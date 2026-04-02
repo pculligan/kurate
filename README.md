@@ -65,6 +65,11 @@ Exporter output shape:
 - Referenced attachments and images are downloaded next to the exported page content.
 - Internal Confluence page links are rewritten to relative Markdown links when the target page is part of the export.
 
+Page identity mapping:
+- Both scripts write a `.confluence-map.json` manifest into the source/output tree.
+- The manifest stores local Markdown paths mapped to Confluence page IDs.
+- `repo_to_confluence.py` reads this file on later runs so pages can be updated by stable page ID even if titles change.
+
 Run reports:
 - `repo_to_confluence.py` writes `repo_to_confluence_report.md` in the current working directory for each run.
 - `confluence_to_repo.py` writes `confluence_to_repo_report.md` in the current working directory for each run.

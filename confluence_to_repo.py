@@ -7,6 +7,7 @@ python confluence_to_repo.py /path/to/output --page PAGE_ID [--recurse]
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -19,6 +20,7 @@ import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 LOG = logging.getLogger("confluence_export")
+MAP_FILENAME = ".confluence-map.json"
 
 
 class ConfluenceClient:
@@ -157,6 +159,19 @@ def write_confluence_to_repo_report(report_path: Path, report: dict) -> None:
         ]
     )
     report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_page_map(output_dir: Path, root_page_id: str, pages_by_id: Dict[str, dict]) -> Path:
+    map_path = output_dir / MAP_FILENAME
+    payload = {
+        "root_page_id": str(root_page_id),
+        "pages": {
+            page["markdown_path"].relative_to(output_dir).as_posix(): str(page_id)
+            for page_id, page in sorted(pages_by_id.items(), key=lambda item: item[1]["markdown_path"].as_posix())
+        },
+    }
+    map_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return map_path
 
 
 def slugify(value: str) -> str:
@@ -609,6 +624,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     enrich_attachments(client, pages_by_id)
     assign_paths(pages_by_id, children_by_id, args.page, output_dir)
     write_pages(client, pages_by_id, output_dir)
+    map_path = write_page_map(output_dir, args.page, pages_by_id)
+    report["warnings"].append(f"Wrote page-id mapping manifest to {map_path}")
     finalize_and_exit(0)
 
 

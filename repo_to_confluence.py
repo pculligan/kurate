@@ -13,6 +13,7 @@ Run: python repo_to_confluence.py /path/to/source --space SPACEKEY --parent PARE
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import sys
@@ -28,6 +29,7 @@ from bs4 import BeautifulSoup
 import markdown
 
 LOG = logging.getLogger("confluence_sync")
+MAP_FILENAME = ".confluence-map.json"
 
 
 class ConfluenceClient:
@@ -243,6 +245,47 @@ def is_remote(url: str) -> bool:
 def normalize_html(s: str) -> str:
     # strip surrounding whitespace and normalize multiple spaces
     return re.sub(r"\s+", " ", s.strip())
+
+
+def relative_source_path(path: Path, source: Path) -> str:
+    return path.relative_to(source).as_posix()
+
+
+def load_page_map(source: Path) -> Dict[str, dict]:
+    map_path = source / MAP_FILENAME
+    if not map_path.exists():
+        return {}
+    try:
+        payload = json.loads(map_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    pages = payload.get("pages", {})
+    out: Dict[str, dict] = {}
+    for key, value in pages.items():
+        if isinstance(value, dict):
+            out[str(key)] = {
+                "page_id": str(value.get("page_id", "")),
+                "content_hash": str(value.get("content_hash", "")),
+                "confluence_version": value.get("confluence_version"),
+            }
+        else:
+            out[str(key)] = {"page_id": str(value), "content_hash": "", "confluence_version": None}
+    return out
+
+
+def write_page_map(source: Path, space: str, root_page_id: str, path_map: Dict[str, dict]) -> None:
+    map_path = source / MAP_FILENAME
+    payload = {
+        "space": space,
+        "root_page_id": str(root_page_id),
+        "pages": dict(sorted(path_map.items())),
+    }
+    map_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def content_fingerprint(body_storage: str) -> str:
+    normalized = normalize_html(body_storage)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def page_is_under_parent(page: dict, parent_id: str) -> bool:
@@ -461,6 +504,9 @@ def main(argv: Optional[List[str]] = None):
 
     # Load ignore patterns
     ignore = load_ignore_patterns(Path(args.exclude).resolve() if args.exclude else source)
+    existing_page_map = load_page_map(source)
+    if existing_page_map:
+        report["warnings"].append(f"Loaded {len(existing_page_map)} page-id mappings from {source / MAP_FILENAME}")
 
     # Collect markdown files
     md_files = collect_markdown_files(source, ignore)
@@ -486,35 +532,17 @@ def main(argv: Optional[List[str]] = None):
         report["conflicts"].append(conflict_message)
         finalize_and_exit(4)
 
-    # Build parent mapping: for each file, its parent is the nearest ancestor directory's readme.md page
-    # The topmost parent will be the page created/found from the source root `readme.md`.
-    # First ensure all directory readmes are present in pages
-    # Create/find the root page from source/readme.md and use it as the top-level parent
-    root_readme = source / "readme.md"
-    if root_readme.exists():
-        root_title = parse_title(root_readme) or (source.name or "root")
-    else:
-        root_title = source.name or "root"
-
-    # find or create the root page under the provided parent
-    root_matches = client.find_pages(args.space, root_title)
-    root_existing = choose_page_for_parent(root_matches, args.parent)
-    if root_existing:
-        root_page_id = root_existing["id"]
-    elif root_matches:
-        conflict_message = format_page_conflict(root_title, root_matches, args.parent)
+    # The provided parent page is treated as the root of the local tree.
+    # A source-root readme.md updates that target page directly.
+    root_page_id = str(args.parent)
+    try:
+        target_root_page = client.get_page(root_page_id)
+    except requests.HTTPError as exc:
+        conflict_message = f"Cannot access target parent/root page {root_page_id}: {exc}"
         LOG.error(conflict_message)
         report["conflicts"].append(conflict_message)
         finalize_and_exit(4)
-    else:
-        narr(f"Would create root page '{root_title}' under parent {args.parent}")
-        if not args.dry_run:
-            created = client.create_page(args.space, root_title, args.parent, "<p>Root page</p>")
-            root_page_id = created["id"]
-            report["created_pages"].append(f"{root_title} (root, parent {args.parent}, id={root_page_id})")
-        else:
-            root_page_id = "dryrun-root-" + root_title
-            report["created_pages"].append(f"Would create {root_title} under parent {args.parent}")
+    root_page_title = target_root_page.get("title", f"page-{root_page_id}")
 
     dir_readmes = {}
     for p in list(pages.keys()):
@@ -554,8 +582,21 @@ def main(argv: Optional[List[str]] = None):
         parent_dir = d.parent
         if parent_dir in dir_pageid:
             chosen_parent = dir_pageid[parent_dir]
-        matches = client.find_pages(args.space, title)
-        existing = choose_page_for_parent(matches, chosen_parent)
+        mapped_page_id = None
+        if readme in pages:
+            mapped_entry = existing_page_map.get(relative_source_path(readme, source), {})
+            mapped_page_id = mapped_entry.get("page_id")
+        existing = None
+        if mapped_page_id:
+            try:
+                existing = client.get_page(mapped_page_id)
+            except requests.HTTPError as exc:
+                report["warnings"].append(
+                    f"Mapped page id {mapped_page_id} for {relative_source_path(readme, source)} was not usable: {exc}"
+                )
+        matches = client.find_pages(args.space, title) if existing is None else []
+        if existing is None:
+            existing = choose_page_for_parent(matches, chosen_parent)
 
         if existing:
             page_id = existing["id"]
@@ -586,8 +627,19 @@ def main(argv: Optional[List[str]] = None):
         else:
             # Create/find child page under the directory page with file's title
             title = pages[p]["title"]
-            matches = client.find_pages(args.space, title)
-            existing = choose_page_for_parent(matches, parent_page_id)
+            mapped_entry = existing_page_map.get(relative_source_path(p, source), {})
+            mapped_page_id = mapped_entry.get("page_id")
+            existing = None
+            if mapped_page_id:
+                try:
+                    existing = client.get_page(mapped_page_id)
+                except requests.HTTPError as exc:
+                    report["warnings"].append(
+                        f"Mapped page id {mapped_page_id} for {relative_source_path(p, source)} was not usable: {exc}"
+                    )
+            matches = client.find_pages(args.space, title) if existing is None else []
+            if existing is None:
+                existing = choose_page_for_parent(matches, parent_page_id)
             page_id = existing["id"] if existing else None
             if page_id:
                 local_to_pageid[p] = page_id
@@ -687,19 +739,35 @@ def main(argv: Optional[List[str]] = None):
                     report["bad_links"] = bad_links
 
         body_storage = str(soup)
+        body_hash = content_fingerprint(body_storage)
+        manifest_key = relative_source_path(p, source)
+        mapped_entry = existing_page_map.setdefault(manifest_key, {})
+        mapped_entry["page_id"] = str(page_id)
 
         if not args.dry_run:
-            # fetch existing page to compare
+            if mapped_entry.get("page_id") == str(page_id) and mapped_entry.get("content_hash") == body_hash:
+                LOG.info("Skipping update for %s (manifest hash unchanged)", title)
+                report["skipped_pages"].append(f"{title} ({page_id}) unchanged via manifest hash")
+                mapped_entry["content_hash"] = body_hash
+                continue
+
             existing = client.get_page(page_id)
-            existing_body = existing.get("body", {}).get("storage", {}).get("value", "")
             existing_version = existing.get("version", {}).get("number", 1)
+            page_title_for_update = title
+            if p == source / "readme.md":
+                page_title_for_update = existing.get("title", root_page_title)
+            existing_body = existing.get("body", {}).get("storage", {}).get("value", "")
             if normalize_html(existing_body) == normalize_html(body_storage):
                 LOG.info("Skipping update for %s (unchanged)", title)
                 report["skipped_pages"].append(f"{title} ({page_id}) unchanged")
+                mapped_entry["content_hash"] = body_hash
+                mapped_entry["confluence_version"] = existing_version
             else:
                 LOG.info("Updating page %s (id=%s) to version %s", title, page_id, existing_version + 1)
-                client.update_page(page_id, title, body_storage, existing_version + 1)
-                report["updated_pages"].append(f"{title} ({page_id}) -> version {existing_version + 1}")
+                client.update_page(page_id, page_title_for_update, body_storage, existing_version + 1)
+                report["updated_pages"].append(f"{page_title_for_update} ({page_id}) -> version {existing_version + 1}")
+                mapped_entry["content_hash"] = body_hash
+                mapped_entry["confluence_version"] = existing_version + 1
         else:
             LOG.info("Dry-run: would update page %s (id=%s)", title, page_id)
             report["updated_pages"].append(f"Would update {title} ({page_id})")
@@ -719,6 +787,21 @@ def main(argv: Optional[List[str]] = None):
         for z in zombies
     ]
     report["bad_links"] = bad_links
+
+    if not args.dry_run:
+        path_map = {}
+        for path, page_id in local_to_pageid.items():
+            key = relative_source_path(path, source)
+            entry = existing_page_map.get(key, {})
+            path_map[key] = {
+                "page_id": str(page_id),
+                "content_hash": str(entry.get("content_hash", "")),
+                "confluence_version": entry.get("confluence_version"),
+            }
+        write_page_map(source, args.space, root_page_id, path_map)
+        report["warnings"].append(f"Wrote page-id mapping manifest to {source / MAP_FILENAME}")
+    else:
+        report["warnings"].append("Dry-run mode: did not update page-id mapping manifest")
 
     if zombies:
         LOG.info("Found %d zombie pages", len(zombies))
