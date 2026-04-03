@@ -20,7 +20,7 @@ import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 LOG = logging.getLogger("confluence_export")
-MAP_FILENAME = ".confluence-map.json"
+MAP_FILENAME = "confluence-map.json"
 
 
 class ConfluenceClient:

@@ -29,7 +29,7 @@ from bs4 import BeautifulSoup
 import markdown
 
 LOG = logging.getLogger("confluence_sync")
-MAP_FILENAME = ".confluence-map.json"
+MAP_FILENAME = "confluence-map.json"
 
 
 class ConfluenceClient:
@@ -745,17 +745,21 @@ def main(argv: Optional[List[str]] = None):
         mapped_entry["page_id"] = str(page_id)
 
         if not args.dry_run:
-            if mapped_entry.get("page_id") == str(page_id) and mapped_entry.get("content_hash") == body_hash:
-                LOG.info("Skipping update for %s (manifest hash unchanged)", title)
-                report["skipped_pages"].append(f"{title} ({page_id}) unchanged via manifest hash")
-                mapped_entry["content_hash"] = body_hash
-                continue
-
             existing = client.get_page(page_id)
             existing_version = existing.get("version", {}).get("number", 1)
             page_title_for_update = title
             if p == source / "readme.md":
                 page_title_for_update = existing.get("title", root_page_title)
+            if (
+                mapped_entry.get("page_id") == str(page_id)
+                and mapped_entry.get("content_hash") == body_hash
+                and mapped_entry.get("confluence_version") == existing_version
+            ):
+                LOG.info("Skipping update for %s (manifest hash and version unchanged)", title)
+                report["skipped_pages"].append(f"{title} ({page_id}) unchanged via manifest hash/version")
+                mapped_entry["content_hash"] = body_hash
+                mapped_entry["confluence_version"] = existing_version
+                continue
             existing_body = existing.get("body", {}).get("storage", {}).get("value", "")
             if normalize_html(existing_body) == normalize_html(body_storage):
                 LOG.info("Skipping update for %s (unchanged)", title)
