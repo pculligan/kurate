@@ -9,14 +9,14 @@ Sync a tree of Markdown files from a local git repo into Confluence, recreating 
 - Convert Markdown to Confluence storage-format (HTML) while preserving formatting and code blocks.
 - Attach images to their respective Confluence pages and update image links.
 - Translate relative links between local markdown files into Confluence page links.
-- Maintain an exclude list (.confluenceignore default) for patterns to skip (e.g., .DS_Store, .git).
+- Maintain an exclude list (`confluenceignore` by default) for patterns to skip (e.g., .DS_Store, .git).
 - Identify Confluence pages under the target parent that have no corresponding local file ("zombies").
 
 ## Inputs / Config
 - `source` (positional) — local folder to sync.
 - Confluence credentials: API key located in `conf-api-key.txt` in project root (or via env var `CONFLUENCE_API_KEY`).
 - Confluence target: `space` (space key) and `parent` (page id or page title) to place the tree under.
-- Optional `.confluenceignore` file in source to list ignore globs.
+- Optional `confluenceignore` file in source to list ignore globs.
 
 ## Output / Reporting
 - Log created/updated pages and attachments.
@@ -36,7 +36,7 @@ Sync a tree of Markdown files from a local git repo into Confluence, recreating 
 5. Conflicts: Keep mapping deterministic by using the directory structure; page titles are taken from each file's H1. If duplicate titles occur in different folders, they will remain distinct pages because they live in different parent pages.
 
 ## Exclude patterns
-- Default exclude patterns: `.DS_Store`, `.git`, `.gitignore` and any entries in `.confluenceignore` (supports glob patterns).
+- Default exclude patterns: `.DS_Store`, `.git`, `.gitignore` and any entries in `confluenceignore` (supports glob patterns).
 
 ## Milestones
 1. CLI and Confluence client

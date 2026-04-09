@@ -12,15 +12,25 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import requests
-from bs4 import BeautifulSoup, NavigableString, Tag
+MISSING_DEPENDENCY_ERROR: Optional[ModuleNotFoundError] = None
+try:
+    import requests
+    from bs4 import BeautifulSoup, NavigableString, Tag
+except ModuleNotFoundError as exc:
+    requests = None  # type: ignore[assignment]
+    BeautifulSoup = None  # type: ignore[assignment]
+    NavigableString = None  # type: ignore[assignment]
+    Tag = None  # type: ignore[assignment]
+    MISSING_DEPENDENCY_ERROR = exc
 
 LOG = logging.getLogger("confluence_export")
 MAP_FILENAME = "confluence-map.json"
+REPORTS_DIRNAME = "reports"
 
 
 class ConfluenceClient:
@@ -92,11 +102,11 @@ class ConfluenceClient:
 
 
 def read_api_key(path: Path) -> Optional[str]:
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
     env = os.environ.get("CONFLUENCE_API_KEY")
     if env:
         return env.strip()
-    if path.exists():
-        return path.read_text(encoding="utf-8").strip()
     return None
 
 
@@ -115,12 +125,21 @@ def report_bullet_lines(items: List[str]) -> List[str]:
     return [f"- {item}" for item in items] if items else ["- None"]
 
 
+def default_report_path(prefix: str) -> Path:
+    reports_dir = Path(__file__).resolve().parent / REPORTS_DIRNAME
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return reports_dir / f"{prefix}_{timestamp}.md"
+
+
 def write_confluence_to_repo_report(report_path: Path, report: dict) -> None:
     lines = [
         "# Confluence To Repo Report",
         "",
         "## Summary",
         "",
+        f"- Generated at: `{report['generated_at']}`",
+        f"- Report file: `{report_path}`",
         f"- Output: `{report['output']}`",
         f"- Root page id: `{report['page']}`",
         f"- Recurse: {report['recurse']}",
@@ -587,12 +606,21 @@ def write_pages(client: ConfluenceClient, pages_by_id: Dict[str, dict], output_d
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv or sys.argv[1:])
+
+    if MISSING_DEPENDENCY_ERROR is not None:
+        missing_name = getattr(MISSING_DEPENDENCY_ERROR, "name", "a required package")
+        raise SystemExit(
+            f"Missing dependency: {missing_name}. Install project dependencies with "
+            f"'pip install -r requirements.txt' and try again."
+        )
+
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s: %(message)s")
 
     output_dir = Path(args.output).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = Path.cwd() / "confluence_to_repo_report.md"
+    report_path = default_report_path("confluence_to_repo_report")
     report = {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "output": str(output_dir),
         "page": str(args.page),
         "recurse": bool(args.recurse),
@@ -604,14 +632,15 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     def finalize_and_exit(code: int = 0) -> None:
         write_confluence_to_repo_report(report_path, report)
+        LOG.info("Wrote run report to %s", report_path)
         if code:
             sys.exit(code)
 
     api_key_path = Path(__file__).parent / "conf-api-key.txt"
     token = read_api_key(api_key_path)
     if not token:
-        LOG.error("Confluence API key not found in %s or CONFLUENCE_API_KEY env var", api_key_path)
-        report["warnings"].append(f"Confluence API key not found in {api_key_path} or CONFLUENCE_API_KEY env var")
+        LOG.error("Confluence API key not found in %s; fallback is CONFLUENCE_API_KEY", api_key_path)
+        report["warnings"].append(f"Confluence API key not found in {api_key_path}; fallback is CONFLUENCE_API_KEY")
         finalize_and_exit(3)
     if not args.email:
         LOG.warning("No email provided; you should pass --email for Confluence API auth")

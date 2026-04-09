@@ -2,5 +2,4 @@ __pycache__
 .DS_Store
 .venv
 conf-api-key.txt
-repo_to_confluence_report.md
-confluence_to_repo_report.md
+reports/

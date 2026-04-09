@@ -1,84 +1,160 @@
 # Confluence Utils
 
-This tool syncs a tree of local Markdown files into Confluence, preserving formatting, images, and translating relative links.
-It also includes a reverse-direction exporter that can scrape a Confluence page tree back into a local Markdown repo structure.
+Small CLI tools for moving content between a local Markdown repo and Confluence:
 
-Quick start (macOS):
+- `repo_to_confluence.py`: sync a local Markdown tree into Confluence pages.
+- `confluence_to_repo.py`: export a Confluence page tree back into Markdown files.
+
+## What This Repo Does
+
+`repo_to_confluence.py`:
+- Walks a local folder tree and treats each Markdown file as a Confluence page.
+- Uses each file's first `# H1` as the Confluence page title.
+- Uploads local images as Confluence attachments.
+- Rewrites relative Markdown links to Confluence page links when the target page is part of the same sync.
+- Writes a `confluence-map.json` manifest so later runs can update pages by stable page id.
+- Produces a timestamped run report in `reports/`.
+
+`confluence_to_repo.py`:
+- Pulls a Confluence page tree into a local folder tree.
+- Writes page content as Markdown.
+- Downloads attachments referenced by exported pages.
+- Rewrites internal Confluence page links to relative Markdown links when possible.
+- Writes a `confluence-map.json` manifest and a timestamped run report in `reports/`.
+
+## Requirements
+
+- Python 3.10+
+- A Confluence Cloud API token
+- Your Confluence account email
+- The correct Confluence base URL, for example `https://mcd-tools.atlassian.net`
+
+Important:
+- Pass the site base URL without `/wiki`.
+- Reports are written automatically to `reports/`, which is gitignored.
+
+## Setup
 
 ```bash
-# create and activate venv
 python3 -m venv .venv
 source .venv/bin/activate
-
-# install dependencies
 pip install -r requirements.txt
+```
 
-# run (example)
-python repo_to_confluence.py /path/to/local/repo --space YOURSPACE --parent PARENT_PAGE_ID
+Preferred:
 
-# Segment Sync example
-python repo_to_confluence.py ../corp-segment-projects --space SA --parent 84969480 --base-url https://mcd-tools.atlassian.net --email patrick.culligan@us.mcd.com
+```bash
+printf '%s\n' 'your-token' > conf-api-key.txt
+```
 
-# export from Confluence back to a local folder tree
-python confluence_to_repo.py /path/to/output --page PAGE_ID --base-url https://mcd-tools.atlassian.net --email you@example.com --recurse
+Fallback:
 
-python confluence_to_repo.py ./output --page 1647640729 --base-url https://mcd-tools.atlassian.net --email patrick.culligan@us.mcd.com --recurse
+```bash
+export CONFLUENCE_API_KEY="your-token"
+```
 
-> https://mcd-tools.atlassian.net/wiki/spaces/SA/pages/1647640729/US+Restaurant+Next+Traffic+Analysis
+## Sync A Local Repo To Confluence
 
-Prerequisites:
-- Place your Confluence API key in `conf-api-key.txt` at the project root (single line API token), or set `CONFLUENCE_API_KEY` env var.
-- Ensure the `space` key and target `parent` page (id) exist in your Confluence instance.
+Basic command:
 
-Files created:
-- `spec.md` — project specification and open questions.
-- `repo_to_confluence.py` — publish a local Markdown tree into Confluence.
-- `confluence_to_repo.py` — export a Confluence page tree into local Markdown files.
-- `requirements.txt` — Python dependencies.
+```bash
+python3 repo_to_confluence.py /path/to/local/repo \
+  --space YOURSPACE \
+  --parent PARENT_PAGE_ID \
+  --base-url https://mcd-tools.atlassian.net \
+  --email you@example.com
+```
 
-CLI arguments
--------------
+Recommended first run:
 
-When running `repo_to_confluence.py`, supply the following arguments:
+```bash
+python3 repo_to_confluence.py /path/to/local/repo \
+  --space YOURSPACE \
+  --parent PARENT_PAGE_ID \
+  --base-url https://mcd-tools.atlassian.net \
+  --email you@example.com \
+  --dry-run
+```
 
-- `source` (positional): Path to the local folder to sync. The script will walk this directory and treat each Markdown file as a Confluence page.
-- `--space`: (required) Confluence space key where pages will be created or updated.
-- `--parent`: (required) Parent page id under which the tree will be created. Use the numeric page id of the Confluence parent.
-- `--base-url`: (optional) Base Confluence URL; defaults to `https://your-domain.atlassian.net/wiki`. For this project you will typically use `https://mcd-tools.atlassian.net`.
-- `--email`: (optional) The Confluence account email used for API authentication (e.g., `patrick.culligan@us.mcd.com`). If omitted you'll be warned and must set the `CONFLUENCE_API_KEY` env var or `conf-api-key.txt`.
-- `--exclude`: (optional) Path to a `.confluenceignore` file with glob patterns to exclude from the sync. If not provided, a `.confluenceignore` in the source root will be used if present. Default excludes include `.DS_Store`, `.git`, and `.gitignore`.
-- `--dry-run`: (flag) Run without making changes to Confluence. Useful for previewing actions.
-- `--verbose` / `-v`: (flag) Enable verbose logging for debugging.
+Segment example:
 
-When running `confluence_to_repo.py`, supply the following arguments:
+```bash
+python3 repo_to_confluence.py ../corp-segment-projects \
+  --space SA \
+  --parent 84969480 \
+  --base-url https://mcd-tools.atlassian.net \
+  --email patrick.culligan@us.mcd.com
+```
 
-- `output` (positional): Local output folder to write into. The root page becomes `readme.md` in this folder.
-- `--page`: (required) Root Confluence page id to export.
-- `--base-url`: (optional) Base Confluence URL; defaults to `https://your-domain.atlassian.net`.
-- `--email`: (optional) The Confluence account email used for API authentication.
-- `--recurse`: (flag) Export child pages recursively. Without this flag, only the specified page is exported.
-- `--verbose` / `-v`: (flag) Enable verbose logging for debugging.
+Expected source conventions:
 
-Exporter output shape:
-- Pages with children become folders containing a `readme.md`.
-- Leaf pages become Markdown files named from the page title.
-- Referenced attachments and images are downloaded next to the exported page content.
-- Internal Confluence page links are rewritten to relative Markdown links when the target page is part of the export.
+- Each Markdown file should have a leading `# Title`.
+- A folder `readme.md` becomes that folder's page.
+- Other Markdown files in the folder become child pages under that folder page.
+- Optional `confluenceignore` files can exclude files or folders with glob patterns.
 
-Page identity mapping:
-- Both scripts write a `confluence-map.json` manifest into the source/output tree.
-- The manifest stores local Markdown paths mapped to Confluence page IDs.
-- `repo_to_confluence.py` reads this file on later runs so pages can be updated by stable page ID even if titles change.
+## Export From Confluence To Markdown
 
-Run reports:
-- `repo_to_confluence.py` writes `repo_to_confluence_report.md` in the current working directory for each run.
-- `confluence_to_repo.py` writes `confluence_to_repo_report.md` in the current working directory for each run.
-- These reports overwrite the previous report of the same name and collect the run summary, warnings, conflicts, and link or attachment issues in a single Markdown file.
+Basic command:
 
-Config and auth files
----------------------
+```bash
+python3 confluence_to_repo.py /path/to/output \
+  --page PAGE_ID \
+  --base-url https://mcd-tools.atlassian.net \
+  --email you@example.com \
+  --recurse
+```
 
-- `conf-api-key.txt`: Place your Confluence API token in this file at the project root (single line). Alternatively set the `CONFLUENCE_API_KEY` environment variable.
-- `.confluenceignore`: Optional file placed in the `source` root listing glob patterns (one per line) to exclude from the sync.
+Example:
 
-Next steps: configure options and run the script once implemented. See `spec.md` for questions about behavior defaults.
+```bash
+python3 confluence_to_repo.py ./output \
+  --page 1647640729 \
+  --base-url https://mcd-tools.atlassian.net \
+  --email patrick.culligan@us.mcd.com \
+  --recurse
+```
+
+Reference page:
+
+`https://mcd-tools.atlassian.net/wiki/spaces/SA/pages/1647640729/US+Restaurant+Next+Traffic+Analysis`
+
+## CLI Reference
+
+`repo_to_confluence.py`:
+
+- `source`: local folder to sync
+- `--space`: required Confluence space key
+- `--parent`: required numeric parent page id
+- `--base-url`: optional, defaults to `https://your-domain.atlassian.net`
+- `--email`: optional, but normally required for API auth
+- `--exclude`: optional path to a `confluenceignore` file
+- `--dry-run`: preview changes without writing to Confluence
+- `--verbose` or `-v`: verbose logging
+
+`confluence_to_repo.py`:
+
+- `output`: local folder to write the export into
+- `--page`: required root Confluence page id
+- `--base-url`: optional, defaults to `https://your-domain.atlassian.net`
+- `--email`: optional, but normally required for API auth
+- `--recurse`: export child pages recursively
+- `--verbose` or `-v`: verbose logging
+
+## Files The Tools Create
+
+- `confluence-map.json`: stable page-id manifest written into the source or output tree
+- `reports/*.md`: timestamped run reports for each sync or export
+
+Report filenames look like:
+
+- `reports/repo_to_confluence_report_2026-04-09_14-32-10.md`
+- `reports/confluence_to_repo_report_2026-04-09_14-32-10.md`
+
+## Usage Notes
+
+- Start with `--dry-run`.
+- Do not include `/wiki` in `--base-url`.
+- The first `# H1` in each Markdown file becomes the Confluence page title.
+- The ignore file is named `confluenceignore` without a leading period in the source repo.
+- Review the generated report in `reports/` after each run.

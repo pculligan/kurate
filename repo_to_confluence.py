@@ -17,6 +17,7 @@ import hashlib
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict
 
@@ -24,12 +25,20 @@ import json
 import re
 from fnmatch import fnmatch
 
-import requests
-from bs4 import BeautifulSoup
-import markdown
+MISSING_DEPENDENCY_ERROR: Optional[ModuleNotFoundError] = None
+try:
+    import requests
+    from bs4 import BeautifulSoup
+    import markdown
+except ModuleNotFoundError as exc:
+    requests = None  # type: ignore[assignment]
+    BeautifulSoup = None  # type: ignore[assignment]
+    markdown = None  # type: ignore[assignment]
+    MISSING_DEPENDENCY_ERROR = exc
 
 LOG = logging.getLogger("confluence_sync")
 MAP_FILENAME = "confluence-map.json"
+REPORTS_DIRNAME = "reports"
 
 
 class ConfluenceClient:
@@ -166,11 +175,11 @@ class ConfluenceClient:
 
 
 def read_api_key(path: Path) -> Optional[str]:
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
     env = os.environ.get("CONFLUENCE_API_KEY")
     if env:
         return env.strip()
-    if path.exists():
-        return path.read_text(encoding="utf-8").strip()
     return None
 
 
@@ -179,9 +188,9 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument("source", help="Source folder to sync")
     p.add_argument("--space", required=True, help="Confluence space key")
     p.add_argument("--parent", required=True, help="Parent page id to attach the tree under")
-    p.add_argument("--base-url", required=False, default="https://your-domain.atlassian.net/wiki", help="Confluence base URL")
+    p.add_argument("--base-url", required=False, default="https://your-domain.atlassian.net", help="Confluence base URL")
     p.add_argument("--email", required=False, help="Confluence account email for API auth")
-    p.add_argument("--exclude", required=False, help="Path to .confluenceignore file")
+    p.add_argument("--exclude", required=False, help="Path to a confluenceignore file")
     p.add_argument("--dry-run", action="store_true", help="Run without making changes")
     p.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     return p.parse_args(argv)
@@ -190,10 +199,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 def load_ignore_patterns(exclude_path: Path) -> List[str]:
     defaults = [".DS_Store", ".git", ".gitignore"]
     patterns = list(defaults)
-    conf = exclude_path / ".confluenceignore"
-    if exclude_path.is_file() and exclude_path.name == ".confluenceignore":
+    conf: Optional[Path] = None
+    if exclude_path.is_file():
         conf = exclude_path
-    if conf.exists():
+    else:
+        candidate = exclude_path / "confluenceignore"
+        if candidate.exists():
+            conf = candidate
+    if conf and conf.exists():
         for line in conf.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             if not s or s.startswith("#"):
@@ -339,12 +352,21 @@ def report_bullet_lines(items: List[str]) -> List[str]:
     return [f"- {item}" for item in items] if items else ["- None"]
 
 
+def default_report_path(prefix: str) -> Path:
+    reports_dir = Path(__file__).resolve().parent / REPORTS_DIRNAME
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return reports_dir / f"{prefix}_{timestamp}.md"
+
+
 def write_repo_to_confluence_report(report_path: Path, report: dict) -> None:
     lines = [
         "# Repo To Confluence Report",
         "",
         "## Summary",
         "",
+        f"- Generated at: `{report['generated_at']}`",
+        f"- Report file: `{report_path}`",
         f"- Mode: {'dry-run' if report['dry_run'] else 'live'}",
         f"- Source: `{report['source']}`",
         f"- Space: `{report['space']}`",
@@ -456,11 +478,19 @@ def main(argv: Optional[List[str]] = None):
     argv = argv or sys.argv[1:]
     args = parse_args(argv)
 
+    if MISSING_DEPENDENCY_ERROR is not None:
+        missing_name = getattr(MISSING_DEPENDENCY_ERROR, "name", "a required package")
+        raise SystemExit(
+            f"Missing dependency: {missing_name}. Install project dependencies with "
+            f"'pip install -r requirements.txt' and try again."
+        )
+
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s: %(message)s")
 
     source = Path(args.source).resolve()
-    report_path = Path.cwd() / "repo_to_confluence_report.md"
+    report_path = default_report_path("repo_to_confluence_report")
     report = {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "dry_run": args.dry_run,
         "source": str(source),
         "space": args.space,
@@ -477,6 +507,7 @@ def main(argv: Optional[List[str]] = None):
 
     def finalize_and_exit(code: int = 0) -> None:
         write_repo_to_confluence_report(report_path, report)
+        LOG.info("Wrote run report to %s", report_path)
         if code:
             sys.exit(code)
 
@@ -488,8 +519,8 @@ def main(argv: Optional[List[str]] = None):
     api_key_path = Path(__file__).parent / "conf-api-key.txt"
     token = read_api_key(api_key_path)
     if not token:
-        LOG.error("Confluence API key not found in %s or CONFLUENCE_API_KEY env var", api_key_path)
-        report["conflicts"].append(f"Confluence API key not found in {api_key_path} or CONFLUENCE_API_KEY env var")
+        LOG.error("Confluence API key not found in %s; fallback is CONFLUENCE_API_KEY", api_key_path)
+        report["conflicts"].append(f"Confluence API key not found in {api_key_path}; fallback is CONFLUENCE_API_KEY")
         finalize_and_exit(3)
 
     if not args.email:
