@@ -35,6 +35,22 @@ Important:
 
 ## Setup
 
+Recommended:
+
+```bash
+./setup.sh
+```
+
+What `setup.sh` does:
+
+- Creates or reuses `.venv`
+- Installs `requirements.txt`
+- Checks whether `conf-api-key.txt` already exists
+- Falls back to checking `CONFLUENCE_API_KEY`
+- Tells you what to do next only if no token is found
+
+Manual setup:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
