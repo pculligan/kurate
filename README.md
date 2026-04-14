@@ -13,6 +13,7 @@ Small CLI tools for moving content between a local Markdown repo and Confluence:
 - Uploads local images as Confluence attachments.
 - Rewrites relative Markdown links to Confluence page links when the target page is part of the same sync.
 - Writes a `confluence-map.json` manifest so later runs can update pages by stable page id.
+- If the source folder is a git repo, attempts to stage and commit `confluence-map.json` automatically.
 - Produces a timestamped run report in `reports/`.
 
 `confluence_to_repo.py`:
@@ -161,6 +162,8 @@ Reference page:
 
 - `confluence-map.json`: stable page-id manifest written into the source or output tree
 - `reports/*.md`: timestamped run reports for each sync or export
+
+For `repo_to_confluence.py`, if the source folder is inside a git repo, the tool will try to stage and commit `confluence-map.json` for you. You should still push that commit afterward.
 
 Report filenames look like:
 

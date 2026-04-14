@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import logging
 import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -294,6 +295,79 @@ def write_page_map(source: Path, space: str, root_page_id: str, path_map: Dict[s
         "pages": dict(sorted(path_map.items())),
     }
     map_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def find_git_repo_root(path: Path) -> Optional[Path]:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return Path(result.stdout.strip())
+
+
+def file_has_uncommitted_changes(repo_root: Path, file_path: Path) -> bool:
+    relative_path = file_path.relative_to(repo_root)
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "--", str(relative_path)],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def commit_page_map(source: Path) -> tuple[bool, str]:
+    repo_root = find_git_repo_root(source)
+    map_path = source / MAP_FILENAME
+    if repo_root is None:
+        return False, f"No git repository found for {source}; commit {map_path.name} manually if you want it tracked."
+
+    try:
+        relative_map_path = map_path.relative_to(repo_root)
+    except ValueError:
+        return False, f"{map_path} is outside git repo {repo_root}; commit it manually if needed."
+
+    if not file_has_uncommitted_changes(repo_root, map_path):
+        return False, f"{relative_map_path} is already up to date in git."
+
+    add_result = subprocess.run(
+        ["git", "add", "--", str(relative_map_path)],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if add_result.returncode != 0:
+        detail = add_result.stderr.strip() or add_result.stdout.strip() or "git add failed"
+        return False, f"Could not stage {relative_map_path}: {detail}"
+
+    commit_result = subprocess.run(
+        ["git", "commit", "-m", f"Update {MAP_FILENAME}", "--", str(relative_map_path)],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if commit_result.returncode != 0:
+        detail = commit_result.stderr.strip() or commit_result.stdout.strip() or "git commit failed"
+        return False, f"Staged {relative_map_path}, but could not commit it automatically: {detail}"
+
+    sha_result = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "new commit"
+    return True, f"Committed {relative_map_path} in {repo_root} at {sha}. Remember to push your branch."
 
 
 def content_fingerprint(body_storage: str) -> str:
@@ -835,6 +909,13 @@ def main(argv: Optional[List[str]] = None):
             }
         write_page_map(source, args.space, root_page_id, path_map)
         report["warnings"].append(f"Wrote page-id mapping manifest to {source / MAP_FILENAME}")
+        committed, git_message = commit_page_map(source)
+        if committed:
+            LOG.info(git_message)
+            report["warnings"].append(git_message)
+        else:
+            LOG.warning(git_message)
+            report["warnings"].append(git_message)
     else:
         report["warnings"].append("Dry-run mode: did not update page-id mapping manifest")
 
