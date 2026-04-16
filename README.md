@@ -11,6 +11,7 @@ Small CLI tools for moving content between a local Markdown repo and Confluence:
 - Walks a local folder tree and treats each Markdown file as a Confluence page.
 - Uses each file's first `# H1` as the Confluence page title.
 - Uploads local images as Confluence attachments.
+- Renders Mermaid code fences to SVG attachments when `mmdc` is installed locally.
 - Rewrites relative Markdown links to Confluence page links when the target page is part of the same sync.
 - Writes a `confluence-map.json` manifest so later runs can update pages by stable page id.
 - If the source folder is a git repo, attempts to stage and commit `confluence-map.json` automatically.
@@ -33,6 +34,7 @@ Small CLI tools for moving content between a local Markdown repo and Confluence:
 Important:
 - Pass the site base URL without `/wiki`.
 - Reports are written automatically to `reports/`, which is gitignored.
+- Mermaid rendering is optional and requires local Mermaid CLI support via `mmdc`.
 
 ## Setup
 
@@ -46,6 +48,7 @@ What `setup.sh` does:
 
 - Creates or reuses `.venv`
 - Installs `requirements.txt`
+- Detects `mmdc` and tries to install Mermaid CLI with npm if it is missing
 - Checks whether `conf-api-key.txt` already exists
 - Falls back to checking `CONFLUENCE_API_KEY`
 - Tells you what to do next only if no token is found
@@ -68,6 +71,12 @@ Fallback:
 
 ```bash
 export CONFLUENCE_API_KEY="your-token"
+```
+
+Optional ignore file:
+
+```bash
+cp confluenceignore.example /path/to/your/source/confluenceignore
 ```
 
 ## Sync A Local Repo To Confluence
@@ -109,6 +118,7 @@ Expected source conventions:
 - A folder `readme.md` becomes that folder's page.
 - Other Markdown files in the folder become child pages under that folder page.
 - Optional `confluenceignore` files can exclude files or folders with glob patterns.
+- Mermaid fences like ```` ```mermaid ```` are rendered to SVG when `mmdc` is available; otherwise they are left as code blocks and called out in the report.
 
 ## Export From Confluence To Markdown
 

@@ -1,0 +1,17 @@
+# macOS / editor noise
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+
+# local environment
+.venv
+__pycache__
+
+# generated output
+reports
+output
+
+# optional working folders you may not want to publish
+scratch
+drafts

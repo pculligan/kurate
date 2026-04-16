@@ -16,9 +16,12 @@ import argparse
 import hashlib
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
+from html import unescape
 from pathlib import Path
 from typing import List, Optional, Dict
 
@@ -40,6 +43,13 @@ except ModuleNotFoundError as exc:
 LOG = logging.getLogger("confluence_sync")
 MAP_FILENAME = "confluence-map.json"
 REPORTS_DIRNAME = "reports"
+MERMAID_IMAGE_WIDTH = "1200"
+MERMAID_DEFAULT_VIEWPORT = (1600, 900)
+MERMAID_WIDE_VIEWPORT = (2400, 320)
+MERMAID_TALL_VIEWPORT = (1600, 1200)
+MERMAID_FLOWCHART_PADDING = 8
+MERMAID_SVG_TRIM_PADDING = 4
+MERMAID_EXPLICIT_SIZE_RATIO_MIN = 0.65
 
 
 class ConfluenceClient:
@@ -263,6 +273,11 @@ def normalize_html(s: str) -> str:
 
 def relative_source_path(path: Path, source: Path) -> str:
     return path.relative_to(source).as_posix()
+
+
+def filesystem_safe_stem(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip().lower()).strip("-")
+    return cleaned or "diagram"
 
 
 def load_page_map(source: Path) -> Dict[str, dict]:
@@ -548,6 +563,421 @@ def build_confluence_page_link(soup: BeautifulSoup, link_text: str, title: str, 
     return link_tag
 
 
+def find_mermaid_cli() -> Optional[List[str]]:
+    mmdc = shutil.which("mmdc")
+    if mmdc:
+        return [mmdc]
+    return None
+
+
+def find_mermaid_cli_package_root() -> Optional[Path]:
+    mmdc = shutil.which("mmdc")
+    if not mmdc:
+        return None
+    resolved = Path(mmdc).resolve()
+    if resolved.name == "cli.js" and resolved.parent.name == "src":
+        return resolved.parent.parent
+    return None
+
+
+def infer_mermaid_viewport(diagram_source: str) -> tuple[int, int]:
+    for line in diagram_source.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = re.match(r"^(?:flowchart|graph)\s+(TB|TD|BT|LR|RL)\b", stripped, flags=re.IGNORECASE)
+        if not match:
+            break
+        direction = match.group(1).upper()
+        if direction in {"LR", "RL"}:
+            return MERMAID_WIDE_VIEWPORT
+        if direction in {"TB", "TD", "BT"}:
+            return MERMAID_TALL_VIEWPORT
+    return MERMAID_DEFAULT_VIEWPORT
+
+
+def normalize_mermaid_svg_canvas(svg_path: Path) -> tuple[bool, str]:
+    text = svg_path.read_text(encoding="utf-8")
+    viewbox_match = re.search(r'viewBox="([0-9.\-]+)\s+([0-9.\-]+)\s+([0-9.\-]+)\s+([0-9.\-]+)"', text)
+    height_match = re.search(r'height="([0-9.]+)"', text)
+    max_width_match = re.search(r'max-width:\s*([0-9.]+)px', text)
+    if not viewbox_match or not height_match:
+        return False, "SVG did not expose a normalizable viewBox/height pair"
+
+    x, y, viewbox_width, viewbox_height = [float(part) for part in viewbox_match.groups()]
+    explicit_height = float(height_match.group(1))
+    explicit_width = float(max_width_match.group(1)) if max_width_match else viewbox_width
+    height_ratio = explicit_height / viewbox_height if viewbox_height else 0.0
+
+    if explicit_height <= 0 or explicit_height >= viewbox_height:
+        return False, "SVG canvas already appears tight enough"
+    if height_ratio < MERMAID_EXPLICIT_SIZE_RATIO_MIN:
+        return False, (
+            f"Explicit SVG height ratio {height_ratio:.2f} is too small to trust for trimming"
+        )
+
+    text = re.sub(r'\sdata-trimmed-from="[^"]*"', "", text, count=1)
+    text, viewbox_count = re.subn(
+        r'viewBox="[^"]+"',
+        f'viewBox="{x:g} {y:g} {explicit_width:g} {explicit_height:g}"',
+        text,
+        count=1,
+    )
+    text, width_count = re.subn(r'width="[^"]+"', f'width="{explicit_width:g}"', text, count=1)
+    text, height_count = re.subn(r'height="[^"]+"', f'height="{explicit_height:g}"', text, count=1)
+    if viewbox_count != 1 or width_count != 1 or height_count != 1:
+        return False, "Could not rewrite root SVG size attributes safely"
+    if 'preserveAspectRatio="' in text:
+        text = re.sub(r'preserveAspectRatio="[^"]+"', 'preserveAspectRatio="xMinYMin meet"', text, count=1)
+    else:
+        text = text.replace("<svg ", '<svg preserveAspectRatio="xMinYMin meet" ', 1)
+    text = text.replace("<svg ", '<svg data-trimmed-from="svg-explicit-size" ', 1)
+    svg_path.write_text(text, encoding="utf-8")
+    return True, ""
+
+
+def render_mermaid_diagram(diagram_source: str, output_path: Path) -> tuple[bool, str]:
+    cli = find_mermaid_cli()
+    if cli is None:
+        return False, "Mermaid CLI not found on PATH. Install `mmdc` to render Mermaid diagrams."
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        input_path = temp_dir / "diagram.mmd"
+        config_path = temp_dir / "mermaid-config.json"
+        input_path.write_text(diagram_source, encoding="utf-8")
+        config_path.write_text(
+            json.dumps({"flowchart": {"diagramPadding": MERMAID_FLOWCHART_PADDING}}),
+            encoding="utf-8",
+        )
+        viewport_width, viewport_height = infer_mermaid_viewport(diagram_source)
+        command = [
+            *cli,
+            "-i",
+            str(input_path),
+            "-o",
+            str(output_path),
+            "-b",
+            "transparent",
+            "-w",
+            str(viewport_width),
+            "-H",
+            str(viewport_height),
+            "-c",
+            str(config_path),
+        ]
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "Mermaid render failed"
+            return False, detail
+
+    if not output_path.exists():
+        return False, f"Mermaid renderer reported success but did not create {output_path.name}"
+
+    normalized, normalize_detail = normalize_mermaid_svg_canvas(output_path)
+    if normalized:
+        return True, ""
+
+    trimmed, trim_detail = trim_mermaid_svg_whitespace(output_path)
+    if not trimmed and trim_detail:
+        detail = trim_detail if not normalize_detail else f"{normalize_detail}; {trim_detail}"
+        return True, f"Rendered Mermaid SVG but could not trim whitespace: {detail}"
+    return True, ""
+
+
+def trim_mermaid_svg_whitespace(svg_path: Path) -> tuple[bool, str]:
+    package_root = find_mermaid_cli_package_root()
+    node = shutil.which("node")
+    if package_root is None or node is None:
+        return False, "Node or Mermaid CLI package root not available"
+
+    trim_script = """
+const fs = require('fs');
+const path = require('path');
+const { createRequire } = require('module');
+
+async function main() {
+  const [packageRoot, svgPath, trimPadding] = process.argv.slice(1);
+  const req = createRequire(path.join(packageRoot, 'package.json'));
+  const puppeteer = req('puppeteer');
+  const rawSvg = fs.readFileSync(svgPath, 'utf8');
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 3200, height: 3200, deviceScaleFactor: 1 });
+    await page.setContent(`<html><body style="margin:0;padding:0;">${rawSvg}</body></html>`, {
+      waitUntil: 'load'
+    });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const result = await page.evaluate((padding) => {
+      const svg = document.querySelector('svg');
+      if (!svg) {
+        throw new Error('No <svg> element found for trimming');
+      }
+      const currentViewBox = svg.viewBox && svg.viewBox.baseVal
+        ? {
+            x: svg.viewBox.baseVal.x,
+            y: svg.viewBox.baseVal.y,
+            width: svg.viewBox.baseVal.width,
+            height: svg.viewBox.baseVal.height
+          }
+        : null;
+      if (currentViewBox && currentViewBox.width > 0 && currentViewBox.height > 0) {
+        const scale = 2;
+        const screenshotWidth = Math.max(1, Math.ceil(currentViewBox.width * scale));
+        const screenshotHeight = Math.max(1, Math.ceil(currentViewBox.height * scale));
+        const previousWidth = svg.getAttribute('width');
+        const previousHeight = svg.getAttribute('height');
+        const previousStyle = svg.getAttribute('style') || '';
+        svg.setAttribute('width', String(screenshotWidth));
+        svg.setAttribute('height', String(screenshotHeight));
+        svg.setAttribute('style', previousStyle.replace(/max-width:\\s*[^;]+;?/g, ''));
+        return {
+          mode: 'png-bounds',
+          viewBox: currentViewBox,
+          screenshotWidth,
+          screenshotHeight,
+          padding,
+          restore: {
+            width: previousWidth,
+            height: previousHeight,
+            style: previousStyle
+          }
+        };
+      }
+      const candidates = [
+        svg.querySelector('#my-svg'),
+        svg.querySelector('g.output'),
+        svg.querySelector('g.root'),
+        svg.querySelector('g'),
+        svg
+      ].filter(Boolean);
+      let bbox = null;
+      let picked = null;
+      for (const candidate of candidates) {
+        const nextBox = candidate.getBBox();
+        if (!Number.isFinite(nextBox.width) || !Number.isFinite(nextBox.height) || nextBox.width <= 0 || nextBox.height <= 0) {
+          continue;
+        }
+        if (!bbox || (nextBox.width * nextBox.height) > (bbox.width * bbox.height)) {
+          bbox = nextBox;
+          picked = candidate;
+        }
+      }
+      if (!bbox) {
+        throw new Error('Could not find a non-empty rendered Mermaid bounding box');
+      }
+      const x = bbox.x - padding;
+      const y = bbox.y - padding;
+      const width = bbox.width + (padding * 2);
+      const height = bbox.height + (padding * 2);
+      svg.setAttribute('viewBox', `${x} ${y} ${width} ${height}`);
+      svg.setAttribute('width', String(width));
+      svg.setAttribute('height', String(height));
+      svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
+      if (picked && picked !== svg && !svg.hasAttribute('data-trimmed-from')) {
+        svg.setAttribute('data-trimmed-from', picked.tagName.toLowerCase());
+      }
+      return { mode: 'svg', svg: svg.outerHTML };
+    }, Number(trimPadding));
+    if (result && result.mode === 'png-bounds') {
+      const handle = await page.$('svg');
+      if (!handle) {
+        throw new Error('Could not find SVG element for screenshot trimming');
+      }
+      const pngBase64 = await handle.screenshot({ encoding: 'base64', omitBackground: true });
+      await page.evaluate((restore) => {
+        const svg = document.querySelector('svg');
+        if (!svg) return;
+        if (restore.width !== null) svg.setAttribute('width', restore.width); else svg.removeAttribute('width');
+        if (restore.height !== null) svg.setAttribute('height', restore.height); else svg.removeAttribute('height');
+        if (restore.style) svg.setAttribute('style', restore.style); else svg.removeAttribute('style');
+      }, result.restore);
+      const pngBytes = Buffer.from(pngBase64, 'base64');
+      const pngSignature = '89504e470d0a1a0a';
+      if (pngBytes.subarray(0, 8).toString('hex') !== pngSignature) {
+        throw new Error('Unexpected screenshot output while trimming SVG');
+      }
+      let offset = 8;
+      let width = 0;
+      let height = 0;
+      while (offset + 8 <= pngBytes.length) {
+        const length = pngBytes.readUInt32BE(offset);
+        const type = pngBytes.subarray(offset + 4, offset + 8).toString('ascii');
+        if (type === 'IHDR') {
+          width = pngBytes.readUInt32BE(offset + 8);
+          height = pngBytes.readUInt32BE(offset + 12);
+          break;
+        }
+        offset += 12 + length;
+      }
+      if (!width || !height) {
+        throw new Error('Could not read PNG dimensions while trimming SVG');
+      }
+      const zlib = require('zlib');
+      const idatChunks = [];
+      offset = 8;
+      while (offset + 8 <= pngBytes.length) {
+        const length = pngBytes.readUInt32BE(offset);
+        const type = pngBytes.subarray(offset + 4, offset + 8).toString('ascii');
+        if (type === 'IDAT') {
+          idatChunks.push(pngBytes.subarray(offset + 8, offset + 8 + length));
+        }
+        offset += 12 + length;
+      }
+      const raw = zlib.inflateSync(Buffer.concat(idatChunks));
+      const stride = (width * 4) + 1;
+      let minX = width;
+      let minY = height;
+      let maxX = -1;
+      let maxY = -1;
+      const prev = Buffer.alloc(width * 4);
+      const curr = Buffer.alloc(width * 4);
+      for (let y = 0; y < height; y++) {
+        const filter = raw[y * stride];
+        raw.copy(curr, 0, y * stride + 1, y * stride + stride);
+        if (filter === 1) {
+          for (let i = 0; i < curr.length; i++) curr[i] = (curr[i] + (i >= 4 ? curr[i - 4] : 0)) & 255;
+        } else if (filter === 2) {
+          for (let i = 0; i < curr.length; i++) curr[i] = (curr[i] + prev[i]) & 255;
+        } else if (filter === 3) {
+          for (let i = 0; i < curr.length; i++) curr[i] = (curr[i] + Math.floor(((i >= 4 ? curr[i - 4] : 0) + prev[i]) / 2)) & 255;
+        } else if (filter === 4) {
+          const paeth = (a, b, c) => {
+            const p = a + b - c;
+            const pa = Math.abs(p - a);
+            const pb = Math.abs(p - b);
+            const pc = Math.abs(p - c);
+            if (pa <= pb && pa <= pc) return a;
+            if (pb <= pc) return b;
+            return c;
+          };
+          for (let i = 0; i < curr.length; i++) {
+            const a = i >= 4 ? curr[i - 4] : 0;
+            const b = prev[i];
+            const c = i >= 4 ? prev[i - 4] : 0;
+            curr[i] = (curr[i] + paeth(a, b, c)) & 255;
+          }
+        }
+        for (let x = 0; x < width; x++) {
+          const alpha = curr[x * 4 + 3];
+          if (alpha > 0) {
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        }
+        curr.copy(prev);
+      }
+      if (maxX >= minX && maxY >= minY) {
+        const scaleX = result.viewBox.width / result.screenshotWidth;
+        const scaleY = result.viewBox.height / result.screenshotHeight;
+        const x = result.viewBox.x + (minX * scaleX) - result.padding;
+        const y = result.viewBox.y + (minY * scaleY) - result.padding;
+        const trimWidth = ((maxX - minX + 1) * scaleX) + (result.padding * 2);
+        const trimHeight = ((maxY - minY + 1) * scaleY) + (result.padding * 2);
+        const svgText = rawSvg
+          .replace(/viewBox="[^"]+"/, `viewBox="${x} ${y} ${trimWidth} ${trimHeight}"`)
+          .replace(/width="[^"]+"/, `width="${trimWidth}"`)
+          .replace(/height="[^"]+"/, `height="${trimHeight}"`);
+        const finalSvg = svgText.includes('preserveAspectRatio=')
+          ? svgText.replace(/preserveAspectRatio="[^"]+"/, 'preserveAspectRatio="xMinYMin meet"')
+          : svgText.replace('<svg ', '<svg preserveAspectRatio="xMinYMin meet" ', 1);
+        fs.writeFileSync(
+          svgPath,
+          finalSvg.includes('data-trimmed-from=')
+            ? finalSvg.replace(/data-trimmed-from="[^"]+"/, 'data-trimmed-from="svg-raster-bounds"')
+            : finalSvg.replace('<svg ', '<svg data-trimmed-from="svg-raster-bounds" ', 1),
+          'utf8'
+        );
+        return;
+      }
+      throw new Error('Could not find non-transparent raster bounds while trimming SVG');
+    }
+    if (result && result.mode === 'svg' && result.svg) {
+      fs.writeFileSync(svgPath, result.svg, 'utf8');
+      return;
+    }
+    throw new Error('Unexpected Mermaid trim result');
+  } finally {
+    await browser.close();
+  }
+}
+
+main().catch((error) => {
+  console.error(error && error.stack ? error.stack : String(error));
+  process.exit(1);
+});
+""".strip()
+
+    result = subprocess.run(
+        [node, "-e", trim_script, str(package_root), str(svg_path), str(MERMAID_SVG_TRIM_PADDING)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "SVG trim failed"
+        return False, detail
+    return True, ""
+
+
+def replace_mermaid_blocks(
+    soup: BeautifulSoup,
+    page_path: Path,
+    page_title: str,
+    page_id: str,
+    client: ConfluenceClient,
+    report: dict,
+    dry_run: bool,
+) -> None:
+    mermaid_blocks = []
+    for code_tag in soup.find_all("code"):
+        classes = code_tag.get("class", [])
+        if "language-mermaid" in classes:
+            pre_tag = code_tag.parent if getattr(code_tag.parent, "name", None) == "pre" else code_tag
+            mermaid_blocks.append((pre_tag, code_tag))
+
+    if not mermaid_blocks:
+        return
+
+    base_name = filesystem_safe_stem(page_path.stem if page_path.stem else page_title)
+    for index, (block_tag, code_tag) in enumerate(mermaid_blocks, start=1):
+        diagram_source = unescape(code_tag.get_text())
+        digest = hashlib.sha256(diagram_source.encode("utf-8")).hexdigest()[:10]
+        filename = f"{base_name}-mermaid-{index}-{digest}.svg"
+
+        if dry_run:
+            placeholder = soup.new_tag("p")
+            placeholder.string = f"[mermaid:{filename}]"
+            block_tag.replace_with(placeholder)
+            report["uploaded_attachments"].append(f"{filename} -> {page_title} ({page_id})")
+            continue
+
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_path = Path(temp_dir_name) / filename
+            rendered, detail = render_mermaid_diagram(diagram_source, output_path)
+            if not rendered:
+                report["warnings"].append(
+                    f"Could not render Mermaid diagram in {page_path}: {detail}. Leaving the Mermaid code block unchanged."
+                )
+                continue
+
+            client.upsert_attachment(page_id, output_path)
+            report["uploaded_attachments"].append(f"{filename} -> {page_title} ({page_id})")
+            new_tag = soup.new_tag("ac:image")
+            new_tag.attrs["ac:width"] = MERMAID_IMAGE_WIDTH
+            ri = soup.new_tag("ri:attachment")
+            ri.attrs["ri:filename"] = filename
+            new_tag.append(ri)
+            block_tag.replace_with(new_tag)
+
+
 def main(argv: Optional[List[str]] = None):
     argv = argv or sys.argv[1:]
     args = parse_args(argv)
@@ -784,6 +1214,16 @@ def main(argv: Optional[List[str]] = None):
         html = markdown.markdown(body_markdown, extensions=["fenced_code", "tables"]) 
         # post-process images and links
         soup = BeautifulSoup(html, "html.parser")
+
+        replace_mermaid_blocks(
+            soup=soup,
+            page_path=p,
+            page_title=title,
+            page_id=page_id,
+            client=client,
+            report=report,
+            dry_run=args.dry_run,
+        )
 
         # Images: upload attachments for relative image sources
         for img in soup.find_all("img"):
