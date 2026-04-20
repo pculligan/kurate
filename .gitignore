@@ -1,5 +1,6 @@
 __pycache__
 .DS_Store
 .venv
-conf-api-key.txt
+confluence-identity.yaml
 reports/
+exports/

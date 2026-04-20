@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$ROOT_DIR/.venv"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-API_KEY_FILE="$ROOT_DIR/conf-api-key.txt"
+IDENTITY_FILE="$ROOT_DIR/confluence-identity.yaml"
 MERMAID_PACKAGE="@mermaid-js/mermaid-cli"
 
 echo "Setting up Confluence Utils in $ROOT_DIR"
@@ -39,17 +39,21 @@ echo
 echo "Setup complete."
 echo
 
-if [[ -s "$API_KEY_FILE" ]]; then
-  echo "Found API key file: $API_KEY_FILE"
-elif [[ -n "${CONFLUENCE_API_KEY:-}" ]]; then
-  echo "Using fallback auth from CONFLUENCE_API_KEY environment variable."
+if [[ -f "$IDENTITY_FILE" ]] && grep -Eq '^[[:space:]]*api_key:[[:space:]]*[^[:space:]]' "$IDENTITY_FILE"; then
+  echo "Found API key in identity config: $IDENTITY_FILE"
 else
   echo "No Confluence API token found yet."
-  echo "Create $API_KEY_FILE with your token on a single line."
-  echo "Fallback option: export CONFLUENCE_API_KEY=\"your-token\""
+  echo "Add api_key: your-token to $IDENTITY_FILE."
+fi
+
+if [[ -f "$IDENTITY_FILE" ]]; then
+  echo "Found identity config: $IDENTITY_FILE"
+else
+  echo "Identity config not found yet."
+  echo "Create $IDENTITY_FILE with your base URL and email."
 fi
 
 echo
 echo "Next steps:"
 echo "source .venv/bin/activate"
-echo "python3 repo_to_confluence.py --help"
+echo "python3 conf_io.py --help"

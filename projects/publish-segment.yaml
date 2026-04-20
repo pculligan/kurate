@@ -1,0 +1,13 @@
+name: publish-segment
+activity: publish
+
+source: ../corp-segment-projects
+space: SA
+parent: 84969480
+excludes:
+  - drafts/**
+  - archive/**
+  - "**/*.tmp.md"
+  - ai-handoff-primer.md
+  - exported/
+dry_run: false

@@ -2,12 +2,11 @@
 
 Small CLI tools for moving content between a local Markdown repo and Confluence:
 
-- `repo_to_confluence.py`: sync a local Markdown tree into Confluence pages.
-- `confluence_to_repo.py`: export a Confluence page tree back into Markdown files.
+- `conf_io.py`: run project-defined sync or export jobs between a local Markdown repo and Confluence.
 
 ## What This Repo Does
 
-`repo_to_confluence.py`:
+`conf_io.py`:
 - Walks a local folder tree and treats each Markdown file as a Confluence page.
 - Uses each file's first `# H1` as the Confluence page title.
 - Uploads local images as Confluence attachments.
@@ -15,14 +14,11 @@ Small CLI tools for moving content between a local Markdown repo and Confluence:
 - Rewrites relative Markdown links to Confluence page links when the target page is part of the same sync.
 - Writes a `confluence-map.json` manifest so later runs can update pages by stable page id.
 - If the source folder is a git repo, attempts to stage and commit `confluence-map.json` automatically.
-- Produces a timestamped run report in `reports/`.
-
-`confluence_to_repo.py`:
 - Pulls a Confluence page tree into a local folder tree.
 - Writes page content as Markdown.
 - Downloads attachments referenced by exported pages.
 - Rewrites internal Confluence page links to relative Markdown links when possible.
-- Writes a `confluence-map.json` manifest and a timestamped run report in `reports/`.
+- Writes `confluence-map.json` manifests and timestamped reports in `reports/`.
 
 ## Requirements
 
@@ -49,9 +45,10 @@ What `setup.sh` does:
 - Creates or reuses `.venv`
 - Installs `requirements.txt`
 - Detects `mmdc` and tries to install Mermaid CLI with npm if it is missing
-- Checks whether `conf-api-key.txt` already exists
-- Falls back to checking `CONFLUENCE_API_KEY`
+- Checks whether `confluence-identity.yaml` already exists and includes `api_key`
 - Tells you what to do next only if no token is found
+
+If `setup.sh` can install Mermaid CLI successfully, Mermaid diagrams will render as trimmed SVG attachments in Confluence.
 
 Manual setup:
 
@@ -61,55 +58,106 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Preferred:
+Recommended identity config at the repo root:
 
-```bash
-printf '%s\n' 'your-token' > conf-api-key.txt
+```yaml
+confluence:
+  base_url: https://mcd-tools.atlassian.net
+  email: your.name@example.com
+  api_key: your-token
 ```
 
-Fallback:
+Notes:
 
-```bash
-export CONFLUENCE_API_KEY="your-token"
+- The identity file is `confluence-identity.yaml` at the repo root.
+- It is gitignored so you can keep your own email and local token there safely.
+- `--base-url` and `--email` still work and override the identity file when passed.
+- `api_key` in the YAML file is required for authenticated runs.
+
+## Project Files
+
+Project files let you store repeatable jobs under a folder like `projects/`.
+
+Example publish project:
+
+```yaml
+name: corp-segment-push
+activity: publish
+
+source: ../corp-segment-projects
+space: SA
+parent: 84969480
+excludes:
+  - drafts/**
+  - archive/**
+  - "**/*.tmp.md"
+dry_run: false
 ```
 
-Optional ignore file:
+Example export project:
+
+```yaml
+name: analytics-exports
+activity: export
+metadata:
+  - sidecar
+
+spaces:
+  SA:
+    pages:
+      - id: 1647640729
+        output: ./exports/traffic-analysis
+        recurse: true
+        excludes:
+          - 1647640999
+          - 1647641000
+      - id: 1723456789
+        output: ./exports/store-forecast
+
+  OPS:
+    pages:
+      - id: 1987654321
+        output: ./exports/ops-playbook
+        recurse: true
+```
+
+Run a publish project:
 
 ```bash
-cp confluenceignore.example /path/to/your/source/confluenceignore
+python3 conf_io.py --project projects/corp-segment-push.yaml
 ```
+
+Run an export project:
+
+```bash
+python3 conf_io.py --project projects/analytics-exports.yaml
+```
+
+Notes:
+
+- Relative paths in project files are resolved from the repo root, not from the project file location.
+- Project files do not contain auth; authentication still comes from `confluence-identity.yaml`.
+- Preferred activity names are `publish` and `export`.
+- Publish projects should define `excludes` directly in the project file as glob patterns.
+- Different publish projects may target the same source tree with different `excludes`.
+- Export projects may set `metadata` to `none`, a single value, or a list of outputs.
+- Valid metadata outputs are `sidecar`, `file`, and `content-block`.
+- `none` means no metadata outputs and may not be combined with other values.
+- `sidecar` writes per-page `*.metadata.json` sidecars.
+- `file` writes one `export.metadata.json` file at the export root for that target.
+- `content-block` appends a clearly labeled Markdown metadata section at the end of each exported file with usefulness-focused signals.
+- On rerun, existing metadata sidecars or `export.metadata.json` are used as a cache hint; when the stored Confluence `version` matches, the exporter skips rewriting that page, and attachment downloads are skipped only when the cached attachment metadata still matches the live Confluence attachment metadata.
+- Export metadata includes rolling analytics windows computed fresh on each run: `year_to_date`, `trailing_year`, and `all_time_proxy`, each with `from_date`, `views`, and `unique_viewers`.
+- Export projects may define multiple spaces and multiple pages per space.
+- Export page targets may define `excludes` to skip specific page ids and their descendants.
+- Each export page target runs independently and is summarized in the project report.
 
 ## Sync A Local Repo To Confluence
 
-Basic command:
+Run the unified script with a publish project file:
 
 ```bash
-python3 repo_to_confluence.py /path/to/local/repo \
-  --space YOURSPACE \
-  --parent PARENT_PAGE_ID \
-  --base-url https://mcd-tools.atlassian.net \
-  --email you@example.com
-```
-
-Recommended first run:
-
-```bash
-python3 repo_to_confluence.py /path/to/local/repo \
-  --space YOURSPACE \
-  --parent PARENT_PAGE_ID \
-  --base-url https://mcd-tools.atlassian.net \
-  --email you@example.com \
-  --dry-run
-```
-
-Segment example:
-
-```bash
-python3 repo_to_confluence.py ../corp-segment-projects \
-  --space SA \
-  --parent 84969480 \
-  --base-url https://mcd-tools.atlassian.net \
-  --email patrick.culligan@us.mcd.com
+python3 conf_io.py --project projects/corp-segment-push.yaml
 ```
 
 Expected source conventions:
@@ -117,29 +165,25 @@ Expected source conventions:
 - Each Markdown file should have a leading `# Title`.
 - A folder `readme.md` becomes that folder's page.
 - Other Markdown files in the folder become child pages under that folder page.
-- Optional `confluenceignore` files can exclude files or folders with glob patterns.
+- Publish exclusions should come from the project's `excludes` list of glob patterns.
 - Mermaid fences like ```` ```mermaid ```` are rendered to SVG when `mmdc` is available; otherwise they are left as code blocks and called out in the report.
+
+Example Mermaid block:
+
+````md
+```mermaid
+flowchart LR
+  A[Restaurant] --> B[Edge]
+  B --> C[GCP]
+```
+````
 
 ## Export From Confluence To Markdown
 
-Basic command:
+Run the unified script with an export project file:
 
 ```bash
-python3 confluence_to_repo.py /path/to/output \
-  --page PAGE_ID \
-  --base-url https://mcd-tools.atlassian.net \
-  --email you@example.com \
-  --recurse
-```
-
-Example:
-
-```bash
-python3 confluence_to_repo.py ./output \
-  --page 1647640729 \
-  --base-url https://mcd-tools.atlassian.net \
-  --email patrick.culligan@us.mcd.com \
-  --recurse
+python3 conf_io.py --project projects/analytics-exports.yaml
 ```
 
 Reference page:
@@ -148,42 +192,34 @@ Reference page:
 
 ## CLI Reference
 
-`repo_to_confluence.py`:
+`conf_io.py`:
 
-- `source`: local folder to sync
-- `--space`: required Confluence space key
-- `--parent`: required numeric parent page id
-- `--base-url`: optional, defaults to `https://your-domain.atlassian.net`
-- `--email`: optional, but normally required for API auth
-- `--exclude`: optional path to a `confluenceignore` file
-- `--dry-run`: preview changes without writing to Confluence
-- `--verbose` or `-v`: verbose logging
-
-`confluence_to_repo.py`:
-
-- `output`: local folder to write the export into
-- `--page`: required root Confluence page id
-- `--base-url`: optional, defaults to `https://your-domain.atlassian.net`
-- `--email`: optional, but normally required for API auth
-- `--recurse`: export child pages recursively
+- `--project`: required path to a YAML project file
+- `--base-url`: optional override for the base URL
+- `--email`: optional override for the auth email
+- `--identity-config`: optional path to a YAML identity config file
 - `--verbose` or `-v`: verbose logging
 
 ## Files The Tools Create
 
 - `confluence-map.json`: stable page-id manifest written into the source or output tree
+- `*.metadata.json`: optional export metadata files such as page sidecars or `export.metadata.json`
 - `reports/*.md`: timestamped run reports for each sync or export
+- `reports/*_project_report_*.md`: timestamped project reports named from the project
+- Exported pages with children or attachments use `slug/readme.md`, and any local attachments sit beside that `readme.md` in the same folder.
 
-For `repo_to_confluence.py`, if the source folder is inside a git repo, the tool will try to stage and commit `confluence-map.json` for you. You should still push that commit afterward.
+For publish projects, if the source folder is inside a git repo, the tool will try to stage and commit `confluence-map.json` for you. You should still push that commit afterward.
 
 Report filenames look like:
 
-- `reports/repo_to_confluence_report_2026-04-09_14-32-10.md`
-- `reports/confluence_to_repo_report_2026-04-09_14-32-10.md`
+- `reports/publish-segment_publish_report_2026-04-09_14-32-10.md`
+- `reports/pull-old-segment-content_export_report_2026-04-09_14-32-10.md`
+- `reports/pull-old-segment-content_project_report_2026-04-09_14-32-10.md`
 
 ## Usage Notes
 
-- Start with `--dry-run`.
+- Define repeatable jobs in project YAML files and run the scripts with `--project`.
 - Do not include `/wiki` in `--base-url`.
+- If `confluence-identity.yaml` exists at the repo root, both tools will use it for default `base_url`, `email`, and required `api_key`.
 - The first `# H1` in each Markdown file becomes the Confluence page title.
-- The ignore file is named `confluenceignore` without a leading period in the source repo.
 - Review the generated report in `reports/` after each run.
