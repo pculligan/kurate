@@ -101,6 +101,29 @@ The intended boundary is:
 - `kurate` does the deterministic, auditable, low-cost work
 - prompt workflows in an IDE agent do the broader interpretive work
 
+## Setup
+
+From the repo root:
+
+```sh
+bash setup.sh
+source .venv/bin/activate  # bash/zsh
+python3 kurate.py --help
+```
+
+The setup script creates or repairs `.venv`, installs Python dependencies from `requirements.txt`, and checks for Mermaid CLI support.
+
+Confluence workflows also expect an identity file at `confluence-identity.yaml` with:
+
+```yaml
+confluence:
+  base_url: https://your-domain.atlassian.net
+  email: you@example.com
+  api_key: your-token
+```
+
+If you prefer not to activate the virtualenv, you can run commands directly with `.venv/bin/python`.
+
 ## Repo Layout
 
 - `kurate.py`
