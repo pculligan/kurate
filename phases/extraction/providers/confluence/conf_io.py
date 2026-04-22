@@ -453,6 +453,7 @@ def _export_single_target(target: Dict[str, Any], identity_overrides: Dict[str, 
         str(target["id"]),
         bool(target.get("recurse", False)),
         excluded_page_ids,
+        str(target.get("space", "")).strip() or None,
     )
     if excluded_hits:
         report["warnings"].append(f"Skipped excluded page ids during collection: {', '.join(excluded_hits)}")

@@ -144,11 +144,11 @@ Likely next additions include:
 
 ## Docs
 
-- Extraction phase: [phases/extraction/README.md](/Users/patrickculligan/work/confluence-util/phases/extraction/README.md)
-- Analysis phase: [phases/analysis/README.md](/Users/patrickculligan/work/confluence-util/phases/analysis/README.md)
-- Triage phase: [phases/triage/README.md](/Users/patrickculligan/work/confluence-util/phases/triage/README.md)
-- Refactoring phase: [phases/refactoring/README.md](/Users/patrickculligan/work/confluence-util/phases/refactoring/README.md)
-- Warehousing phase: [phases/warehousing/README.md](/Users/patrickculligan/work/confluence-util/phases/warehousing/README.md)
-- Prompt packs: [prompts/README.md](/Users/patrickculligan/work/confluence-util/prompts/README.md)
-- Confluence extraction provider overview: [phases/extraction/providers/confluence/README.md](/Users/patrickculligan/work/confluence-util/phases/extraction/providers/confluence/README.md)
-- Confluence extraction provider spec: [phases/extraction/providers/confluence/spec.md](/Users/patrickculligan/work/confluence-util/phases/extraction/providers/confluence/spec.md)
+- Extraction phase: [phases/extraction/README.md](/Users/patrickculligan/work/kurate/phases/extraction/README.md)
+- Analysis phase: [phases/analysis/README.md](/Users/patrickculligan/work/kurate/phases/analysis/README.md)
+- Triage phase: [phases/triage/README.md](/Users/patrickculligan/work/kurate/phases/triage/README.md)
+- Refactoring phase: [phases/refactoring/README.md](/Users/patrickculligan/work/kurate/phases/refactoring/README.md)
+- Warehousing phase: [phases/warehousing/README.md](/Users/patrickculligan/work/kurate/phases/warehousing/README.md)
+- Prompt packs: [prompts/README.md](/Users/patrickculligan/work/kurate/prompts/README.md)
+- Confluence extraction provider overview: [phases/extraction/providers/confluence/README.md](/Users/patrickculligan/work/kurate/phases/extraction/providers/confluence/README.md)
+- Confluence extraction provider spec: [phases/extraction/providers/confluence/spec.md](/Users/patrickculligan/work/kurate/phases/extraction/providers/confluence/spec.md)

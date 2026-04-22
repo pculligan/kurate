@@ -162,6 +162,29 @@ def load_existing_metadata_index(output_dir: Path) -> Dict[str, dict]:
     return manifest_index
 
 
+def load_existing_page_map(output_dir: Path) -> Dict[str, Path]:
+    path_index: Dict[str, Path] = {}
+    map_path = output_dir / MAP_FILENAME
+    page_map = _load_json_mapping(map_path)
+    if not page_map:
+        return path_index
+    pages = page_map.get("pages", {})
+    if not isinstance(pages, dict):
+        return path_index
+    for relative_path, page_id in pages.items():
+        relative = str(relative_path).strip()
+        page_key = str(page_id).strip()
+        if not relative or not page_key:
+            continue
+        candidate = (output_dir / relative).resolve()
+        try:
+            candidate.relative_to(output_dir.resolve())
+        except ValueError:
+            continue
+        path_index[page_key] = candidate
+    return path_index
+
+
 def ensure_unique_path(path: Path, used_paths: set[Path]) -> Path:
     if path not in used_paths and not path.exists():
         used_paths.add(path)
@@ -181,6 +204,7 @@ def assign_paths(
     root_id: str,
     output_dir: Path,
 ) -> None:
+    existing_page_map = load_existing_page_map(output_dir)
     used_paths: set[Path] = {output_dir, output_dir / "readme.md"}
     root = pages_by_id[root_id]
     root["folder_path"] = output_dir
@@ -196,6 +220,30 @@ def assign_paths(
             child["slug"] = slug
             has_children = bool(children_by_id.get(child_id))
             has_attachments = bool(child.get("attachments"))
+            existing_markdown_path = existing_page_map.get(str(child_id))
+            if existing_markdown_path:
+                if has_children or has_attachments or existing_markdown_path.name == "readme.md":
+                    folder_path = (
+                        existing_markdown_path.parent
+                        if existing_markdown_path.name == "readme.md"
+                        else existing_markdown_path.with_suffix("")
+                    )
+                    markdown_path = folder_path / "readme.md"
+                    if folder_path not in used_paths and markdown_path not in used_paths:
+                        child["folder_path"] = folder_path
+                        child["markdown_path"] = markdown_path
+                        used_paths.add(folder_path)
+                        used_paths.add(markdown_path)
+                        walk(child_id)
+                        continue
+                else:
+                    markdown_path = existing_markdown_path
+                    if markdown_path not in used_paths:
+                        child["folder_path"] = markdown_path.parent
+                        child["markdown_path"] = markdown_path
+                        used_paths.add(markdown_path)
+                        walk(child_id)
+                        continue
             if has_children or has_attachments:
                 folder_path = ensure_unique_path(parent_folder / slug, used_paths)
                 child["folder_path"] = folder_path
@@ -325,6 +373,10 @@ def inline_text(node, context: dict) -> str:
         return render_confluence_link(node, context)
     if name == "ac:image":
         return render_confluence_image(node, context)
+    if name == "ac:emoticon":
+        return render_emoticon(node)
+    if name == "ac:inline-comment-marker":
+        return "".join(inline_text(child, context) for child in node.children)
     if name == "ac:placeholder":
         return render_placeholder(node)
     if name == "ac:task-list":
@@ -412,6 +464,11 @@ def render_block(node, context: dict) -> str:
         return "---\n\n"
     if name == "ac:image":
         return render_confluence_image(node, context) + "\n\n"
+    if name == "ac:emoticon":
+        emoticon = render_emoticon(node)
+        return emoticon + "\n\n" if emoticon else ""
+    if name == "ac:inline-comment-marker":
+        return "".join(render_block(child, context) for child in node.children)
     if name == "ac:placeholder":
         placeholder = render_placeholder(node)
         return placeholder + "\n\n" if placeholder else ""
@@ -481,6 +538,41 @@ def render_status_macro(node: Tag) -> str:
     return f"`Status: {title}`"
 
 
+def render_labeled_block(label: str, content: str) -> str:
+    content = content.strip()
+    if not content:
+        return f"**{label}:**\n\n"
+    if "\n" not in content:
+        return f"**{label}:** {content}\n\n"
+    return f"**{label}:**\n\n{content}\n\n"
+
+
+def render_plain_text_macro_body(node: Tag) -> str:
+    body = node.find("ac:plain-text-body")
+    if body is None:
+        return ""
+    text = body.get_text()
+    if not text.strip():
+        return ""
+    stripped = text.lstrip()
+    language = "json" if stripped.startswith("{") or stripped.startswith("[") else "text"
+    return f"```{language}\n{text.rstrip()}\n```"
+
+
+def render_rich_or_plain_macro_body(node: Tag, context: dict) -> str:
+    rich_body = node.find("ac:rich-text-body")
+    if rich_body is not None:
+        content = render_rich_text_children(rich_body, context).strip()
+        if content:
+            return content
+    return render_plain_text_macro_body(node)
+
+
+def render_callout_macro(node: Tag, context: dict, label: str) -> str:
+    content = render_rich_or_plain_macro_body(node, context)
+    return render_labeled_block(label, content) if content else ""
+
+
 def render_children_macro(node: Tag, context: dict) -> str:
     page_info = context["page"]
     style = macro_parameter(node, "style")
@@ -500,13 +592,19 @@ def render_toc_macro(node: Tag) -> str:
 
 
 def render_info_macro(node: Tag, context: dict) -> str:
-    rich_body = node.find("ac:rich-text-body")
-    content = render_rich_text_children(rich_body, context)
-    if not content:
-        return ""
-    lines = ["> Info"]
-    lines.extend(f"> {line}" if line else ">" for line in content.splitlines())
-    return "\n".join(lines) + "\n\n"
+    return render_callout_macro(node, context, "Info")
+
+
+def render_tip_macro(node: Tag, context: dict) -> str:
+    return render_callout_macro(node, context, "Tip")
+
+
+def render_warning_macro(node: Tag, context: dict) -> str:
+    return render_callout_macro(node, context, "Warning")
+
+
+def render_excerpt_macro(node: Tag, context: dict) -> str:
+    return render_callout_macro(node, context, "Excerpt")
 
 
 def render_details_macro(node: Tag, context: dict) -> str:
@@ -620,6 +718,207 @@ def render_gliffy_macro(node: Tag, context: dict) -> str:
     )
 
 
+def _page_stub_from_api_payload(page: dict) -> dict:
+    return {
+        "id": page["id"],
+        "title": page.get("title", f"Page {page['id']}"),
+        "body_storage": page.get("body", {}).get("storage", {}).get("value", ""),
+        "space_key": page.get("space", {}).get("key"),
+        "attachments": [],
+        "cached_attachments_by_filename": {},
+    }
+
+
+def _load_page_attachments(client: ConfluenceClient, page_info: dict) -> None:
+    if page_info.get("attachments"):
+        return
+    attachments = []
+    for attachment in client.get_attachments(str(page_info["id"])):
+        filename = read_attachment_filename(attachment)
+        download = attachment.get("_links", {}).get("download")
+        attachments.append(
+            {
+                "filename": filename,
+                "download": download,
+                "id": attachment.get("id"),
+                "version": attachment.get("version", {}).get("number"),
+                "media_type": attachment.get("metadata", {}).get("mediaType"),
+                "local_filename": filename,
+            }
+        )
+    page_info["attachments"] = attachments
+
+
+def resolve_excerpt_include_page(node: Tag, context: dict) -> tuple[Optional[str], Optional[dict]]:
+    page_ref = node.find("ri:page")
+    if page_ref is None:
+        return None, None
+
+    target_id = page_ref.get("ri:content-id")
+    target_title = page_ref.get("ri:content-title")
+    target_space = page_ref.get("ri:space-key") or page_ref.get("ri:spacekey") or context["page"].get("space_key")
+    if not target_id:
+        if target_title:
+            target_id = context["title_to_id"].get(target_title)
+
+    if target_id and target_id in context["pages_by_id"]:
+        return str(target_id), context["pages_by_id"][target_id]
+
+    cache = context["report"].setdefault("_excerpt_include_page_cache", {})
+    if target_id:
+        cached = cache.get(str(target_id))
+        if cached is not None:
+            return str(target_id), cached
+        try:
+            page = context["client"].get_page(str(target_id), expand="body.storage,version,ancestors")
+        except requests.HTTPError:
+            cache[str(target_id)] = None
+            return str(target_id), None
+        cached_page = _page_stub_from_api_payload(page)
+        _load_page_attachments(context["client"], cached_page)
+        cache[str(target_id)] = cached_page
+        return str(target_id), cached_page
+
+    if target_title and target_space:
+        cache_key = f"{target_space}:{target_title}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return (str(cached["id"]) if cached else None), cached
+        try:
+            page = context["client"].find_page(target_space, target_title)
+        except requests.HTTPError:
+            cache[cache_key] = None
+            return None, None
+        if not page:
+            cache[cache_key] = None
+            return None, None
+        cached_page = _page_stub_from_api_payload(page)
+        _load_page_attachments(context["client"], cached_page)
+        cache[cache_key] = cached_page
+        return str(cached_page["id"]), cached_page
+
+    return None, None
+
+
+def find_excerpt_body(page_info: dict, excerpt_name: str = "") -> Optional[Tag]:
+    storage_html = page_info.get("body_storage", "")
+    if not storage_html:
+        return None
+    soup = BeautifulSoup(storage_html, "html.parser")
+    fallback_excerpt: Optional[Tag] = None
+    for macro in soup.find_all("ac:structured-macro"):
+        if macro_name(macro) != "excerpt":
+            continue
+        if fallback_excerpt is None:
+            fallback_excerpt = macro
+        if excerpt_name:
+            name = macro_parameter(macro, "name")
+            if name != excerpt_name:
+                continue
+        rich_body = macro.find("ac:rich-text-body")
+        if rich_body and rich_body.get_text(" ", strip=True):
+            return rich_body
+        plain_body = macro.find("ac:plain-text-body")
+        if plain_body and plain_body.get_text(strip=True):
+            return plain_body
+    if excerpt_name or fallback_excerpt is None:
+        return None
+    rich_body = fallback_excerpt.find("ac:rich-text-body")
+    if rich_body and rich_body.get_text(" ", strip=True):
+        return rich_body
+    plain_body = fallback_excerpt.find("ac:plain-text-body")
+    if plain_body and plain_body.get_text(strip=True):
+        return plain_body
+    return None
+
+
+def render_excerpt_include_macro(node: Tag, context: dict) -> str:
+    target_id, target_page = resolve_excerpt_include_page(node, context)
+    if not target_page:
+        detail = "Unsupported Confluence macro `excerpt-include` without a resolvable source page"
+        if target_id:
+            detail += f" (target page `{target_id}`)"
+        return render_unsupported_block(
+            node,
+            context,
+            kind="macro",
+            content_type="excerpt-include",
+            detail=detail,
+        )
+
+    excerpt_name = macro_parameter(node, "name")
+    excerpt_stack = context.setdefault("_excerpt_include_stack", [])
+    target_page_id = str(target_page.get("id", target_id or "")).strip()
+    if target_page_id and target_page_id in excerpt_stack:
+        return render_unsupported_block(
+            node,
+            context,
+            kind="macro",
+            content_type="excerpt-include",
+            detail=f"Unsupported Confluence macro `excerpt-include` due to recursive include on page `{target_page_id}`",
+        )
+
+    excerpt_body = find_excerpt_body(target_page, excerpt_name=excerpt_name)
+    if excerpt_body is None:
+        detail = f"Unsupported Confluence macro `excerpt-include`: no excerpt found on source page `{target_page.get('title', target_page_id)}`"
+        if excerpt_name:
+            detail += f" for excerpt name `{excerpt_name}`"
+        return render_unsupported_block(
+            node,
+            context,
+            kind="macro",
+            content_type="excerpt-include",
+            detail=detail,
+        )
+
+    excerpt_stack.append(target_page_id)
+    try:
+        nested_context = dict(context)
+        nested_page = dict(context["page"])
+        nested_page["attachments"] = target_page.get("attachments", [])
+        nested_page["cached_attachments_by_filename"] = target_page.get("cached_attachments_by_filename", {})
+        nested_context["page"] = nested_page
+        nested_context["_excerpt_include_stack"] = excerpt_stack
+        if excerpt_body.name == "ac:plain-text-body":
+            text = excerpt_body.get_text()
+            if not text.strip():
+                return ""
+            stripped = text.lstrip()
+            language = "json" if stripped.startswith("{") or stripped.startswith("[") else "text"
+            return f"```{language}\n{text.rstrip()}\n```\n\n"
+        content = render_rich_text_children(excerpt_body, nested_context)
+        return content.rstrip() + "\n\n" if content.strip() else ""
+    finally:
+        excerpt_stack.pop()
+
+
+def render_expand_macro(node: Tag, context: dict) -> str:
+    title = macro_parameter(node, "title") or "Expanded Content"
+    content = render_rich_or_plain_macro_body(node, context)
+    return render_labeled_block(f"Expand: {title}", content) if content else f"**Expand: {title}**\n\n"
+
+
+def render_attachments_macro(node: Tag, context: dict) -> str:
+    page_info = context["page"]
+    client = context["client"]
+    attachments = sorted(page_info.get("attachments", []), key=lambda item: item.get("filename", "").lower())
+    if not attachments:
+        return ""
+    lines = ["**Attachments:**", ""]
+    for attachment in attachments:
+        filename = attachment.get("filename")
+        if not filename:
+            continue
+        asset_path = download_attachment_for_page(client, page_info, filename)
+        if asset_path:
+            lines.append(f"- [{filename}]({relative_asset_link(page_info, asset_path)})")
+        else:
+            lines.append(f"- {filename}")
+    if len(lines) == 2:
+        return ""
+    return "\n".join(lines) + "\n\n"
+
+
 def render_macro(node: Tag, context: dict) -> str:
     name = macro_name(node)
     if name in {"code", "noformat"}:
@@ -634,9 +933,21 @@ def render_macro(node: Tag, context: dict) -> str:
         return render_toc_macro(node)
     if name == "info":
         return render_info_macro(node, context)
+    if name == "tip":
+        return render_tip_macro(node, context)
+    if name == "warning":
+        return render_warning_macro(node, context)
+    if name == "excerpt":
+        return render_excerpt_macro(node, context)
+    if name == "excerpt-include":
+        return render_excerpt_include_macro(node, context)
     if name == "details":
         return render_details_macro(node, context)
-    if name == "view-file":
+    if name == "expand":
+        return render_expand_macro(node, context)
+    if name == "attachments":
+        return render_attachments_macro(node, context)
+    if name in {"view-file", "viewxls"}:
         return render_view_file_macro(node, context)
     if name == "jira":
         return render_jira_macro(node, context)
@@ -845,6 +1156,16 @@ def render_confluence_link(node: Tag, context: dict) -> str:
     return link_text
 
 
+def render_emoticon(node: Tag) -> str:
+    fallback = (
+        node.get("ac:emoji-fallback")
+        or node.get("ac:emoji-shortname")
+        or node.get("ac:name")
+        or ""
+    )
+    return str(fallback).strip()
+
+
 def storage_to_markdown(storage_html: str, context: dict) -> str:
     soup = BeautifulSoup(storage_html, "html.parser")
     body_parts = [render_block(child, context) for child in soup.contents]
@@ -869,6 +1190,7 @@ def collect_pages(
     root_id: str,
     recurse: bool,
     excluded_page_ids: set[str],
+    default_space_key: Optional[str] = None,
 ) -> tuple[Dict[str, dict], Dict[str, List[str]], List[str]]:
     pages_by_id: Dict[str, dict] = {}
     children_by_id: Dict[str, List[str]] = {}
@@ -885,7 +1207,7 @@ def collect_pages(
             "id": page["id"],
             "title": page["title"],
             "body_storage": page.get("body", {}).get("storage", {}).get("value", ""),
-            "space_key": page.get("space", {}).get("key"),
+            "space_key": page.get("space", {}).get("key") or default_space_key,
             "page_url": f"{client.base_url}/wiki/pages/viewpage.action?pageId={page['id']}",
             "created_at": page.get("history", {}).get("createdDate"),
             "created_by": page.get("history", {}).get("createdBy", {}).get("displayName"),

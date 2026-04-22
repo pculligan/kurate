@@ -51,4 +51,4 @@ But broader questions like:
 
 are often better handled by an IDE agent working against the local corpus.
 
-The prompt packs under [prompts/](/Users/patrickculligan/work/confluence-util/prompts/README.md) are meant to support that handoff.
+The prompt packs under [prompts/](/Users/patrickculligan/work/kurate/prompts/README.md) are meant to support that handoff.

@@ -50,7 +50,7 @@ That includes things like:
 
 ## Current Packs
 
-- [analysis/single-page-review.md](/Users/patrickculligan/work/confluence-util/prompts/analysis/single-page-review.md)
-- [analysis/duplicate-group-review.md](/Users/patrickculligan/work/confluence-util/prompts/analysis/duplicate-group-review.md)
-- [analysis/site-story-review.md](/Users/patrickculligan/work/confluence-util/prompts/analysis/site-story-review.md)
-- [triage/archive-decision.md](/Users/patrickculligan/work/confluence-util/prompts/triage/archive-decision.md)
+- [analysis/single-page-review.md](/Users/patrickculligan/work/kurate/prompts/analysis/single-page-review.md)
+- [analysis/duplicate-group-review.md](/Users/patrickculligan/work/kurate/prompts/analysis/duplicate-group-review.md)
+- [analysis/site-story-review.md](/Users/patrickculligan/work/kurate/prompts/analysis/site-story-review.md)
+- [triage/archive-decision.md](/Users/patrickculligan/work/kurate/prompts/triage/archive-decision.md)

@@ -24,8 +24,8 @@ The current implemented extraction provider is Confluence.
 
 Confluence-specific behavior lives in:
 
-- [phases/extraction/providers/confluence/README.md](/Users/patrickculligan/work/confluence-util/phases/extraction/providers/confluence/README.md)
-- [phases/extraction/providers/confluence/spec.md](/Users/patrickculligan/work/confluence-util/phases/extraction/providers/confluence/spec.md)
+- [phases/extraction/providers/confluence/README.md](/Users/patrickculligan/work/kurate/phases/extraction/providers/confluence/README.md)
+- [phases/extraction/providers/confluence/spec.md](/Users/patrickculligan/work/kurate/phases/extraction/providers/confluence/spec.md)
 
 ## Success Criteria
 
