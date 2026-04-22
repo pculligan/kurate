@@ -10,8 +10,33 @@ MERMAID_PACKAGE="@mermaid-js/mermaid-cli"
 
 echo "Setting up the Knowledge Cleanup Suite in $ROOT_DIR"
 
+needs_venv_rebuild() {
+  if [[ ! -d "$VENV_DIR" ]]; then
+    return 0
+  fi
+
+  if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    return 0
+  fi
+
+  if [[ -f "$VENV_DIR/bin/pip" ]]; then
+    local pip_shebang
+    pip_shebang="$(head -n 1 "$VENV_DIR/bin/pip" || true)"
+    if [[ "$pip_shebang" == "#!"*"/.venv/bin/python"* ]] && [[ "$pip_shebang" != "#!$VENV_DIR/bin/python"* ]]; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+if needs_venv_rebuild; then
+  echo "Rebuilding virtualenv at $VENV_DIR to repair stale interpreter paths..."
+  rm -rf "$VENV_DIR"
+fi
+
 "$PYTHON_BIN" -m venv "$VENV_DIR"
-"$VENV_DIR/bin/pip" install -r "$ROOT_DIR/requirements.txt"
+"$VENV_DIR/bin/python" -m pip install -r "$ROOT_DIR/requirements.txt"
 
 echo
 echo "Checking Mermaid CLI support..."
@@ -55,5 +80,5 @@ fi
 
 echo
 echo "Next steps:"
-echo "source .venv/bin/activate"
+echo "source .venv/bin/activate  # bash/zsh"
 echo "python3 kurate.py --help"
