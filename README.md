@@ -6,6 +6,41 @@ The immediate target is Confluence, but the larger goal is broader: extract bloa
 
 The real problem is not "how do I sync Confluence." It is "how do I separate active knowledge from accumulated documentation sediment."
 
+## Setup
+
+From the repo root:
+
+```sh
+bash setup.sh
+source .venv/bin/activate  # bash/zsh
+python3 kurate.py --help
+```
+
+The setup script creates or repairs `.venv`, installs Python dependencies from `requirements.txt`, and checks for Mermaid CLI support.
+
+Confluence workflows also expect an identity file at `confluence-identity.yaml` with:
+
+```yaml
+confluence:
+  base_url: https://your-domain.atlassian.net
+  email: you@example.com
+  api_key: your-token
+```
+
+If you prefer not to activate the virtualenv, you can run commands directly with `.venv/bin/python`.
+
+## Usage
+
+The main entry point is `kurate.py`.
+
+```sh
+python3 kurate.py --project projects/alex-project.yaml extract
+python3 kurate.py --project projects/pull-old-segment-content.yaml analyze
+python3 kurate.py --project projects/pull-old-segment-content.yaml triage
+```
+
+Project YAML files in `projects/` define the workspace, phase configuration, and Confluence targets for each run.
+
 ## Purpose
 
 The suite is meant to support a full knowledge-triage workflow:
@@ -100,29 +135,6 @@ The intended boundary is:
 
 - `kurate` does the deterministic, auditable, low-cost work
 - prompt workflows in an IDE agent do the broader interpretive work
-
-## Setup
-
-From the repo root:
-
-```sh
-bash setup.sh
-source .venv/bin/activate  # bash/zsh
-python3 kurate.py --help
-```
-
-The setup script creates or repairs `.venv`, installs Python dependencies from `requirements.txt`, and checks for Mermaid CLI support.
-
-Confluence workflows also expect an identity file at `confluence-identity.yaml` with:
-
-```yaml
-confluence:
-  base_url: https://your-domain.atlassian.net
-  email: you@example.com
-  api_key: your-token
-```
-
-If you prefer not to activate the virtualenv, you can run commands directly with `.venv/bin/python`.
 
 ## Repo Layout
 
