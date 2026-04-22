@@ -1,13 +1,18 @@
 name: publish-segment
-activity: publish
+workspace: ../corp-segment-projects
+phases:
+  extraction:
+    provider: confluence
+    activity: publish
 
-source: ../corp-segment-projects
-space: SA
-parent: 84969480
-excludes:
-  - drafts/**
-  - archive/**
-  - "**/*.tmp.md"
-  - ai-handoff-primer.md
-  - exported/
-dry_run: false
+    source: .
+    space: SA
+    parent: 84969480
+    excludes:
+      - drafts/**
+      - archive/**
+      - "**/*.tmp.md"
+      - ai-handoff-primer.md
+      - exported/
+      - old-content/
+    dry_run: false

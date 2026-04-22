@@ -6,17 +6,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .auth import missing_dependency_message, resolve_api_key
-from .client import ConfluenceClient
-from .config import identity_config_path, resolve_identity_settings
-from .constants import MAP_FILENAME
-from .deps import markdown, requests
-from .reports import (
+from shared.reports import (
     project_report_path,
     write_confluence_to_repo_report,
     write_project_report,
     write_repo_to_confluence_report,
 )
+from .auth import missing_dependency_message, resolve_api_key
+from .client import ConfluenceClient
+from .config import identity_config_path, resolve_identity_settings
+from .constants import MAP_FILENAME
+from .deps import markdown, requests
 
 LOG = logging.getLogger("conf_io")
 
@@ -37,7 +37,7 @@ def _resolve_identity(identity_overrides: Dict[str, Optional[str]]) -> Dict[str,
 
 def sync_to_confluence(project: Dict[str, Any], identity_overrides: Dict[str, Optional[str]], helpers: Any) -> int:
     source = Path(project["source"]).resolve()
-    report_path = project_report_path("publish_report", project.get("name"), project.get("project_path"))
+    report_path = project_report_path("extract-publish", project.get("name"), project.get("project_path"))
     report = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "dry_run": bool(project.get("dry_run", False)),
@@ -232,8 +232,11 @@ def sync_to_confluence(project: Dict[str, Any], identity_overrides: Dict[str, Op
         title = meta["title"]
         helpers.LOG.info("Processing %s -> page %s", path, page_id)
         markdown_text = path.read_text(encoding="utf-8")
-        markdown_links = helpers.extract_markdown_links(markdown_text)
-        body_markdown = helpers.strip_leading_title_heading(markdown_text, title)
+        publish_markdown = helpers.strip_generated_metadata_block(
+            helpers.strip_generated_analysis_block(markdown_text)
+        )
+        markdown_links = helpers.extract_markdown_links(publish_markdown)
+        body_markdown = helpers.strip_leading_title_heading(publish_markdown, title)
         html = markdown.markdown(body_markdown, extensions=["fenced_code", "tables"])
         soup = helpers.BeautifulSoup(html, "html.parser")
 
@@ -384,15 +387,17 @@ def _export_single_target(target: Dict[str, Any], identity_overrides: Dict[str, 
     output_dir = Path(target["output"]).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = project_report_path(
-        "export_report",
+        "extract-export",
         target.get("project_name"),
         target.get("project_path"),
     )
     report = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "output": str(output_dir),
+        "workspace": target.get("workspace"),
         "page": str(target["id"]),
         "recurse": bool(target.get("recurse", False)),
+        "force": bool(target.get("force", False)),
         "metadata_outputs": list(target.get("metadata", ["none"])),
         "excluded_pages": sorted({str(page_id).strip() for page_id in target.get("excludes", []) if str(page_id).strip()}),
         "skipped_pages": [],
@@ -400,6 +405,7 @@ def _export_single_target(target: Dict[str, Any], identity_overrides: Dict[str, 
         "metadata_files_written": [],
         "downloaded_attachments": [],
         "attachment_cache_hits": [],
+        "analytics_cache_hits": [],
         "unresolved_links": [],
         "unsupported_content": [],
         "unsupported_content_counter": 0,
@@ -451,16 +457,17 @@ def _export_single_target(target: Dict[str, Any], identity_overrides: Dict[str, 
     if excluded_hits:
         report["warnings"].append(f"Skipped excluded page ids during collection: {', '.join(excluded_hits)}")
     if str(target["id"]) in excluded_page_ids:
-        report["warnings"].append(f"Root page {target['id']} was excluded; nothing was exported")
-        return finalize(0)
+        report["warnings"].append(
+            f"Root page {target['id']} is being used as the extraction anchor, but its own content will not be exported"
+        )
 
     for page_info in pages_by_id.values():
         page_info["report"] = report
         page_info["metadata_outputs"] = list(target.get("metadata", ["none"]))
-    helpers.enrich_analytics(client, pages_by_id, report)
     helpers.enrich_attachments(client, pages_by_id)
     helpers.assign_paths(pages_by_id, children_by_id, str(target["id"]), output_dir)
     helpers.apply_export_cache(pages_by_id, output_dir, report)
+    helpers.enrich_analytics(client, pages_by_id, report)
     helpers.write_pages(client, pages_by_id, output_dir)
     if "file" in target.get("metadata", []):
         manifest_path = helpers.export_metadata_manifest_path(output_dir)
@@ -476,7 +483,7 @@ def _export_single_target(target: Dict[str, Any], identity_overrides: Dict[str, 
 
 
 def export_from_confluence(project: Dict[str, Any], identity_overrides: Dict[str, Optional[str]], helpers: Any) -> int:
-    summary_report_path = project_report_path("project_report", project.get("name"), project.get("project_path"))
+    summary_report_path = project_report_path("extract-summary", project.get("name"), project.get("project_path"))
     project_report = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "project": project["project_path"],
@@ -495,6 +502,7 @@ def export_from_confluence(project: Dict[str, Any], identity_overrides: Dict[str
             target_with_project["project_name"] = project.get("name")
             target_with_project["project_path"] = project.get("project_path")
             target_with_project["metadata"] = list(project.get("metadata", ["none"]))
+            target_with_project["force"] = bool(project.get("force", False))
             result = _export_single_target(target_with_project, identity_overrides, helpers)
             target_summary = {
                 "label": f"{space_key}:{page_entry['id']}",

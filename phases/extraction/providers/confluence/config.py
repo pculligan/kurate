@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict
 
 from .constants import DEFAULT_BASE_URL, IDENTITY_CONFIG_FILENAME, PROJECT_ROOT

@@ -1,14 +1,24 @@
 name: old-segment-content
-activity: export
-metadata:
-  - file
-  - content-block
+workspace: ../corp-segment-projects/old-content
+phases:
+  extraction:
+    provider: confluence
+    activity: export
+    metadata:
+      - file
 
-spaces:
-  SA:
-    pages:
-      - id: 84969480
-        output: ./exported/segment-older-content
-        recurse: true
-        excludes:
-          - 1759707339
+    spaces:
+      SA:
+        pages:
+          - id: 84969480
+            output: .
+            recurse: true
+            excludes:
+              - 1759707339
+              - 84969480
+  analysis:
+    scoring:
+      outputs:
+        - file
+  triage:
+    manifest: {}

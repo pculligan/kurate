@@ -1,225 +1,154 @@
-# Confluence Utils
+# Knowledge Cleanup Suite
 
-Small CLI tools for moving content between a local Markdown repo and Confluence:
+This repo is for building a suite of tools that help turn messy collaboration content into something usable again.
 
-- `conf_io.py`: run project-defined sync or export jobs between a local Markdown repo and Confluence.
+The immediate target is Confluence, but the larger goal is broader: extract bloated knowledge bases into cleaner local forms, analyze them, identify what is still valuable, and move the long tail of stale material into an archive that remains available without drowning day-to-day discovery.
 
-## What This Repo Does
+The real problem is not "how do I sync Confluence." It is "how do I separate active knowledge from accumulated documentation sediment."
 
-`conf_io.py`:
-- Walks a local folder tree and treats each Markdown file as a Confluence page.
-- Uses each file's first `# H1` as the Confluence page title.
-- Uploads local images as Confluence attachments.
-- Renders Mermaid code fences to SVG attachments when `mmdc` is installed locally.
-- Rewrites relative Markdown links to Confluence page links when the target page is part of the same sync.
-- Writes a `confluence-map.json` manifest so later runs can update pages by stable page id.
-- If the source folder is a git repo, attempts to stage and commit `confluence-map.json` automatically.
-- Pulls a Confluence page tree into a local folder tree.
-- Writes page content as Markdown.
-- Downloads attachments referenced by exported pages.
-- Rewrites internal Confluence page links to relative Markdown links when possible.
-- Writes `confluence-map.json` manifests and timestamped reports in `reports/`.
+## Purpose
 
-## Requirements
+The suite is meant to support a full knowledge-triage workflow:
 
-- Python 3.10+
-- A Confluence Cloud API token
-- Your Confluence account email
-- The correct Confluence base URL, for example `https://mcd-tools.atlassian.net`
+1. Extract content from systems like Confluence into a cleaner offline representation such as Markdown.
+2. Preserve enough metadata and signals to judge freshness, usage, authority, duplication, and cleanup difficulty.
+3. Use scripts and AI workflows to score, summarize, cluster, dedupe, and triage the exported corpus.
+4. Promote useful material into a more curated knowledge set.
+5. Relegate stale or low-value content into an intentionally low-noise archive.
 
-Important:
-- Pass the site base URL without `/wiki`.
-- Reports are written automatically to `reports/`, which is gitignored.
-- Mermaid rendering is optional and requires local Mermaid CLI support via `mmdc`.
+That archive still matters. It just should not compete with the active working knowledge people are actually trying to find.
 
-## Setup
+## Suite Shape
 
-Recommended:
+The suite is organized around a few stages:
 
-```bash
-./setup.sh
-```
+### Extraction
 
-What `setup.sh` does:
+Pull pages, attachments, metadata, usage signals, unsupported-content markers, and reports into a local Markdown corpus.
 
-- Creates or reuses `.venv`
-- Installs `requirements.txt`
-- Detects `mmdc` and tries to install Mermaid CLI with npm if it is missing
-- Checks whether `confluence-identity.yaml` already exists and includes `api_key`
-- Tells you what to do next only if no token is found
+### Analysis
 
-If `setup.sh` can install Mermaid CLI successfully, Mermaid diagrams will render as trimmed SVG attachments in Confluence.
+Run utilities and prompts that help evaluate:
 
-Manual setup:
+- freshness
+- usage
+- likely authority
+- duplication
+- topical overlap
+- cleanup difficulty
+- archival candidacy
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+### Decision Support
 
-Recommended identity config at the repo root:
+Produce useful review outputs such as:
 
-```yaml
-confluence:
-  base_url: https://mcd-tools.atlassian.net
-  email: your.name@example.com
-  api_key: your-token
-```
+- keep and curate
+- stale but historically important
+- duplicate or overlapping
+- archive candidate
+- manual review needed
 
-Notes:
+### Refactoring
 
-- The identity file is `confluence-identity.yaml` at the repo root.
-- It is gitignored so you can keep your own email and local token there safely.
-- `--base-url` and `--email` still work and override the identity file when passed.
-- `api_key` in the YAML file is required for authenticated runs.
+Use AI and scripts to:
 
-## Project Files
+- draft canonical summaries
+- merge overlapping material
+- improve information architecture
+- generate proposed curated Markdown trees
 
-Project files let you store repeatable jobs under a folder like `projects/`.
+### Warehousing
 
-Example publish project:
+Move the long tail into a secondary store that is still accessible but no longer clutters the primary knowledge surface.
 
-```yaml
-name: corp-segment-push
-activity: publish
+Examples might include:
 
-source: ../corp-segment-projects
-space: SA
-parent: 84969480
-excludes:
-  - drafts/**
-  - archive/**
-  - "**/*.tmp.md"
-dry_run: false
-```
+- a local Markdown repo
+- a static site
+- a search index
+- a separate cold-storage corpus
 
-Example export project:
+## Current Scope
 
-```yaml
-name: analytics-exports
-activity: export
-metadata:
-  - sidecar
+The current implemented provider is Confluence.
 
-spaces:
-  SA:
-    pages:
-      - id: 1647640729
-        output: ./exports/traffic-analysis
-        recurse: true
-        excludes:
-          - 1647640999
-          - 1647641000
-      - id: 1723456789
-        output: ./exports/store-forecast
+Today, the repo already supports a solid ingestion layer:
 
-  OPS:
-    pages:
-      - id: 1987654321
-        output: ./exports/ops-playbook
-        recurse: true
-```
+- project-driven export from Confluence into Markdown
+- project-driven publish from Markdown back to Confluence
+- attachment handling
+- metadata capture
+- usefulness-oriented export signals
+- export and publish reports
 
-Run a publish project:
+That Confluence layer is intended to be the first provider inside the broader suite, not the final shape of the repo.
 
-```bash
-python3 conf_io.py --project projects/corp-segment-push.yaml
-```
+The first analysis utility is now in place as well:
 
-Run an export project:
+- page scoring over exported metadata
+- JSON and CSV score outputs
+- optional analysis sidecars and Markdown analysis blocks
+- a short analysis report summarizing recommended actions
+- cache-aware reruns with a top-level `--force` escape hatch
 
-```bash
-python3 conf_io.py --project projects/analytics-exports.yaml
-```
+The first triage utility is also in place:
 
-Notes:
+- a triage manifest generator
+- JSON, CSV, and Markdown outputs for human + IDE-agent review
 
-- Relative paths in project files are resolved from the repo root, not from the project file location.
-- Project files do not contain auth; authentication still comes from `confluence-identity.yaml`.
-- Preferred activity names are `publish` and `export`.
-- Publish projects should define `excludes` directly in the project file as glob patterns.
-- Different publish projects may target the same source tree with different `excludes`.
-- Export projects may set `metadata` to `none`, a single value, or a list of outputs.
-- Valid metadata outputs are `sidecar`, `file`, and `content-block`.
-- `none` means no metadata outputs and may not be combined with other values.
-- `sidecar` writes per-page `*.metadata.json` sidecars.
-- `file` writes one `export.metadata.json` file at the export root for that target.
-- `content-block` appends a clearly labeled Markdown metadata section at the end of each exported file with usefulness-focused signals.
-- On rerun, existing metadata sidecars or `export.metadata.json` are used as a cache hint; when the stored Confluence `version` matches, the exporter skips rewriting that page, and attachment downloads are skipped only when the cached attachment metadata still matches the live Confluence attachment metadata.
-- Export metadata includes rolling analytics windows computed fresh on each run: `year_to_date`, `trailing_year`, and `all_time_proxy`, each with `from_date`, `views`, and `unique_viewers`.
-- Export projects may define multiple spaces and multiple pages per space.
-- Export page targets may define `excludes` to skip specific page ids and their descendants.
-- Each export page target runs independently and is summarized in the project report.
+The intended boundary is:
 
-## Sync A Local Repo To Confluence
+- `kurate` does the deterministic, auditable, low-cost work
+- prompt workflows in an IDE agent do the broader interpretive work
 
-Run the unified script with a publish project file:
+## Repo Layout
 
-```bash
-python3 conf_io.py --project projects/corp-segment-push.yaml
-```
+- `kurate.py`
+  Top-level suite entry point. Today it exposes extraction, analysis, and triage workflows.
+- `shared/`
+  Shared suite plumbing such as project loading and report generation.
+- `phases/`
+  Phase-level docs describing the intended pipeline from extraction through warehousing.
+- `projects/`
+  Reusable job definitions that are expected to become a shared contract across stages and tools.
+- `prompts/`
+  Prompt packs for higher-context review work in an IDE agent against a local kurate working copy.
 
-Expected source conventions:
+## Architecture Direction
 
-- Each Markdown file should have a leading `# Title`.
-- A folder `readme.md` becomes that folder's page.
-- Other Markdown files in the folder become child pages under that folder page.
-- Publish exclusions should come from the project's `excludes` list of glob patterns.
-- Mermaid fences like ```` ```mermaid ```` are rendered to SVG when `mmdc` is available; otherwise they are left as code blocks and called out in the report.
+The suite is meant to grow beyond Confluence without forcing Confluence-specific ideas into every layer.
 
-Example Mermaid block:
+The intended shape is:
 
-````md
-```mermaid
-flowchart LR
-  A[Restaurant] --> B[Edge]
-  B --> C[GCP]
-```
-````
+- `shared/`
+  Shared functionality used across providers and workflow stages.
+- `phases/`
+  Workflow stages, each with its own docs and, where appropriate, phase-local implementation.
+- `projects/`
+  Reusable job definitions that can be shared across extraction, analysis, and later workflow stages.
 
-## Export From Confluence To Markdown
+Today, `shared/` is intentionally small. It handles shared concerns like project loading and reports. Over time it may also grow to include shared metadata models, orchestration helpers, and scoring or triage primitives.
 
-Run the unified script with an export project file:
+## Expected Next Steps
 
-```bash
-python3 conf_io.py --project projects/analytics-exports.yaml
-```
+The current Confluence workflows are the ingestion layer for a broader cleanup system.
 
-Reference page:
+Likely next additions include:
 
-`https://mcd-tools.atlassian.net/wiki/spaces/SA/pages/1647640729/US+Restaurant+Next+Traffic+Analysis`
+- analysis utilities
+- duplicate and overlap detection
+- archival candidacy scoring
+- prompt-assisted summarization and consolidation in IDE agents
+- git/repo utilities for storing and curating cleaned corpora
+- possible future providers such as Teams or SharePoint
 
-## CLI Reference
+## Docs
 
-`conf_io.py`:
-
-- `--project`: required path to a YAML project file
-- `--base-url`: optional override for the base URL
-- `--email`: optional override for the auth email
-- `--identity-config`: optional path to a YAML identity config file
-- `--verbose` or `-v`: verbose logging
-
-## Files The Tools Create
-
-- `confluence-map.json`: stable page-id manifest written into the source or output tree
-- `*.metadata.json`: optional export metadata files such as page sidecars or `export.metadata.json`
-- `reports/*.md`: timestamped run reports for each sync or export
-- `reports/*_project_report_*.md`: timestamped project reports named from the project
-- Exported pages with children or attachments use `slug/readme.md`, and any local attachments sit beside that `readme.md` in the same folder.
-
-For publish projects, if the source folder is inside a git repo, the tool will try to stage and commit `confluence-map.json` for you. You should still push that commit afterward.
-
-Report filenames look like:
-
-- `reports/publish-segment_publish_report_2026-04-09_14-32-10.md`
-- `reports/pull-old-segment-content_export_report_2026-04-09_14-32-10.md`
-- `reports/pull-old-segment-content_project_report_2026-04-09_14-32-10.md`
-
-## Usage Notes
-
-- Define repeatable jobs in project YAML files and run the scripts with `--project`.
-- Do not include `/wiki` in `--base-url`.
-- If `confluence-identity.yaml` exists at the repo root, both tools will use it for default `base_url`, `email`, and required `api_key`.
-- The first `# H1` in each Markdown file becomes the Confluence page title.
-- Review the generated report in `reports/` after each run.
+- Extraction phase: [phases/extraction/README.md](/Users/patrickculligan/work/confluence-util/phases/extraction/README.md)
+- Analysis phase: [phases/analysis/README.md](/Users/patrickculligan/work/confluence-util/phases/analysis/README.md)
+- Triage phase: [phases/triage/README.md](/Users/patrickculligan/work/confluence-util/phases/triage/README.md)
+- Refactoring phase: [phases/refactoring/README.md](/Users/patrickculligan/work/confluence-util/phases/refactoring/README.md)
+- Warehousing phase: [phases/warehousing/README.md](/Users/patrickculligan/work/confluence-util/phases/warehousing/README.md)
+- Prompt packs: [prompts/README.md](/Users/patrickculligan/work/confluence-util/prompts/README.md)
+- Confluence extraction provider overview: [phases/extraction/providers/confluence/README.md](/Users/patrickculligan/work/confluence-util/phases/extraction/providers/confluence/README.md)
+- Confluence extraction provider spec: [phases/extraction/providers/confluence/spec.md](/Users/patrickculligan/work/confluence-util/phases/extraction/providers/confluence/spec.md)

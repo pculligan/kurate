@@ -8,7 +8,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 IDENTITY_FILE="$ROOT_DIR/confluence-identity.yaml"
 MERMAID_PACKAGE="@mermaid-js/mermaid-cli"
 
-echo "Setting up Confluence Utils in $ROOT_DIR"
+echo "Setting up the Knowledge Cleanup Suite in $ROOT_DIR"
 
 "$PYTHON_BIN" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install -r "$ROOT_DIR/requirements.txt"
@@ -50,10 +50,10 @@ if [[ -f "$IDENTITY_FILE" ]]; then
   echo "Found identity config: $IDENTITY_FILE"
 else
   echo "Identity config not found yet."
-  echo "Create $IDENTITY_FILE with your base URL and email."
+  echo "Create $IDENTITY_FILE with your base URL, email, and api_key."
 fi
 
 echo
 echo "Next steps:"
 echo "source .venv/bin/activate"
-echo "python3 conf_io.py --help"
+echo "python3 kurate.py --help"

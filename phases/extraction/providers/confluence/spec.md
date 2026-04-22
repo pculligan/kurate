@@ -4,9 +4,9 @@
 
 Provide two CLI workflows for moving structured content between a local Markdown repo and Confluence Cloud:
 
-- `conf_io.py`: run either publish or export behavior based on a project file's `activity`
+- `kurate.py extract`: run either publish or export behavior based on a project file's `activity`
 
-Also provide a project-driven workflow so repeatable sync and export jobs can be defined in YAML and run without retyping a large set of CLI arguments.
+Also provide a project-driven workflow so repeatable efforts can define extraction behavior in YAML and run without retyping a large set of CLI arguments.
 
 The tools are intended to preserve useful structure, support repeatable runs, and produce enough reporting to make sync/export behavior understandable and auditable.
 
@@ -14,25 +14,24 @@ The tools are intended to preserve useful structure, support repeatable runs, an
 
 ### Goal
 
-Support a folder of YAML project files that define repeatable jobs.
+Support a folder of YAML project files that define repeatable efforts with phase-specific configuration.
 
 The intent is:
 
 - avoid repeatedly typing page ids, output paths, space keys, and parent ids
 - make sync and export jobs reviewable and shareable as config
 - support richer export plans than the current single-page CLI
-- preserve the existing direct CLI entry points for ad hoc use
 
 ### Project storage
 
 Project definitions are expected to live in a folder such as `projects/`.
 
-Each file in that folder defines one job or one grouped export plan.
+Each file in that folder defines one named effort, with phase-specific configuration under `phases`.
 
 Examples:
 
-- `projects/corp-segment-push.yaml`
-- `projects/analytics-exports.yaml`
+- `projects/publish-segment.yaml`
+- `projects/pull-old-segment-content.yaml`
 
 ### Execution direction
 
@@ -40,16 +39,17 @@ Project files are the primary runtime input for the top-level entry point.
 
 Preferred direction:
 
-- `conf_io.py` reads a project file and dispatches by `activity`
-- shared orchestration lives in `lib/conf_io.py`
-- helper code for each direction lives in `lib/`
+- `kurate.py --project ... extract` reads a project file and dispatches by `phases.extraction`
+- shared Confluence extraction orchestration lives in `phases/extraction/providers/confluence/conf_io.py`
+- helper code for each direction lives beside that provider orchestration code
 
 ### Shared project rules
 
 Project files should follow these rules:
 
-- `activity` is required
-- preferred values are `publish` and `export`
+- `phases` is required
+- `phases.extraction.provider` is required for extraction projects
+- `phases.extraction.activity` is required for extraction projects
 - unknown fields should be treated as validation errors
 - auth settings should not live in project files
 - project files should describe job intent and targets, not credentials
@@ -58,7 +58,7 @@ Project files should follow these rules:
 Recommended shared top-level fields:
 
 - `name`: optional human-readable label
-- `activity`: required workflow selector
+- `phases`: required phase configuration mapping
 
 ### Repo to Confluence project shape
 
@@ -68,30 +68,34 @@ Recommended shape:
 
 ```yaml
 name: corp-segment-push
-activity: publish
+phases:
+  extraction:
+    provider: confluence
+    activity: publish
 
-source: ../corp-segment-projects
-space: SA
-parent: 84969480
-excludes:
-  - drafts/**
-  - archive/**
-  - "**/*.tmp.md"
-dry_run: false
+    source: ../corp-segment-projects
+    space: SA
+    parent: 84969480
+    excludes:
+      - drafts/**
+      - archive/**
+      - "**/*.tmp.md"
+    dry_run: false
 ```
 
 Required fields:
 
-- `activity`
-- `source`
-- `space`
-- `parent`
+- `phases.extraction.provider`
+- `phases.extraction.activity`
+- `phases.extraction.source`
+- `phases.extraction.space`
+- `phases.extraction.parent`
 
 Optional fields:
 
 - `name`
-- `excludes`
-- `dry_run`
+- `phases.extraction.excludes`
+- `phases.extraction.dry_run`
 
 Behavior:
 
@@ -117,38 +121,42 @@ Recommended shape:
 
 ```yaml
 name: analytics-exports
-activity: export
-metadata:
-  - sidecar
+phases:
+  extraction:
+    provider: confluence
+    activity: export
+    metadata:
+      - sidecar
 
-spaces:
-  SA:
-    pages:
-      - id: 1647640729
-        output: ./exports/traffic-analysis
-        recurse: true
-        excludes:
-          - 1647640999
-          - 1647641000
-      - id: 1723456789
-        output: ./exports/store-forecast
+    spaces:
+      SA:
+        pages:
+          - id: 1647640729
+            output: ./exports/traffic-analysis
+            recurse: true
+            excludes:
+              - 1647640999
+              - 1647641000
+          - id: 1723456789
+            output: ./exports/store-forecast
 
-  OPS:
-    pages:
-      - id: 1987654321
-        output: ./exports/ops-playbook
-        recurse: true
+      OPS:
+        pages:
+          - id: 1987654321
+            output: ./exports/ops-playbook
+            recurse: true
 ```
 
 Required fields:
 
-- `activity`
-- `spaces`
+- `phases.extraction.provider`
+- `phases.extraction.activity`
+- `phases.extraction.spaces`
 
 Optional top-level fields:
 
 - `name`
-- `metadata`
+- `phases.extraction.metadata`
 
 Required fields for each page entry:
 
@@ -162,8 +170,8 @@ Optional fields for each page entry:
 
 Behavior:
 
-- `activity: export` requires at least one configured space
-- `metadata` may be `none`, a single metadata output, or a list of metadata outputs
+- `phases.extraction.activity: export` requires at least one configured space
+- `phases.extraction.metadata` may be `none`, a single metadata output, or a list of metadata outputs
 - valid metadata outputs are `sidecar`, `file`, and `content-block`
 - `metadata: sidecar` should write per-page metadata sidecars such as `readme.metadata.json`
 - `metadata: file` should write one root-level metadata file such as `export.metadata.json`

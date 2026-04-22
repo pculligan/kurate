@@ -18,12 +18,12 @@ from html import unescape
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from lib.auth import missing_dependency_message
-from lib.client import ConfluenceClient
-from lib.conf_io import sync_to_confluence
-from lib.constants import MAP_FILENAME
-from lib.deps import BeautifulSoup, MISSING_DEPENDENCY_ERROR, markdown, requests
-from lib.project_config import PROJECT_ACTIVITY_PUBLISH, load_project_config
+from shared.project_config import PHASE_EXTRACTION, PROJECT_ACTIVITY_PUBLISH, load_phase_config
+from phases.extraction.providers.confluence.auth import missing_dependency_message
+from phases.extraction.providers.confluence.client import ConfluenceClient
+from phases.extraction.providers.confluence.conf_io import sync_to_confluence
+from phases.extraction.providers.confluence.constants import MAP_FILENAME
+from phases.extraction.providers.confluence.deps import BeautifulSoup, MISSING_DEPENDENCY_ERROR, markdown, requests
 
 LOG = logging.getLogger("confluence_sync")
 MERMAID_IMAGE_WIDTH = "1200"
@@ -46,7 +46,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 
 
 def load_ignore_patterns(extra_patterns: Optional[List[str]] = None) -> List[str]:
-    defaults = [".DS_Store", ".git", ".gitignore", "*.metadata.json"]
+    defaults = [".DS_Store", ".git", ".gitignore", "*.metadata.json", "*.analysis.json"]
     patterns = list(defaults)
     if extra_patterns:
         patterns.extend(pattern.strip() for pattern in extra_patterns if pattern and pattern.strip())
@@ -102,6 +102,32 @@ def strip_leading_title_heading(markdown_text: str, title: str) -> str:
             return "\n".join(remaining)
         return markdown_text
     return markdown_text
+
+
+def strip_generated_metadata_block(markdown_text: str) -> str:
+    pattern = re.compile(
+        r"\n*---\n\n## Export Metadata\n\n"
+        r"Machine-generated export metadata\. This section was added during Confluence export and is not part of the original authored content\.\n"
+        r"(?:\n- .*)+\n*\Z",
+        re.DOTALL,
+    )
+    stripped = pattern.sub("", markdown_text)
+    if stripped == markdown_text:
+        return markdown_text
+    return stripped.rstrip() + "\n"
+
+
+def strip_generated_analysis_block(markdown_text: str) -> str:
+    pattern = re.compile(
+        r"\n*---\n\n## Analysis Assessment\n\n"
+        r"Machine-generated analysis signals\. This section was added by kurate during analysis and is not part of the original authored content\.\n"
+        r"(?:\n- .*)+\n*\Z",
+        re.DOTALL,
+    )
+    stripped = pattern.sub("", markdown_text)
+    if stripped == markdown_text:
+        return markdown_text
+    return stripped.rstrip() + "\n"
 
 
 def is_remote(url: str) -> bool:
@@ -741,9 +767,13 @@ def main(argv: Optional[List[str]] = None):
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s: %(message)s")
     try:
-        project = load_project_config(Path(args.project).expanduser().resolve())
+        project = load_phase_config(Path(args.project).expanduser().resolve(), PHASE_EXTRACTION)
     except ValueError as exc:
         LOG.error("Could not load project config: %s", exc)
+        raise SystemExit(2)
+
+    if project.get("provider") != "confluence":
+        LOG.error("Project %s uses provider %s, expected %s", args.project, project.get("provider"), "confluence")
         raise SystemExit(2)
 
     if project["activity"] != PROJECT_ACTIVITY_PUBLISH:

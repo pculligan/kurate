@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
-from lib.auth import missing_dependency_message
-from lib.client import ConfluenceClient
-from lib.conf_io import export_from_confluence
-from lib.constants import MAP_FILENAME
-from lib.deps import BeautifulSoup, MISSING_DEPENDENCY_ERROR, NavigableString, Tag, requests
-from lib.project_config import PROJECT_ACTIVITY_EXPORT, load_project_config
+from shared.project_config import PHASE_EXTRACTION, PROJECT_ACTIVITY_EXPORT, load_phase_config
+from phases.extraction.providers.confluence.auth import missing_dependency_message
+from phases.extraction.providers.confluence.client import ConfluenceClient
+from phases.extraction.providers.confluence.conf_io import export_from_confluence
+from phases.extraction.providers.confluence.constants import MAP_FILENAME
+from phases.extraction.providers.confluence.deps import BeautifulSoup, MISSING_DEPENDENCY_ERROR, NavigableString, Tag, requests
 
 LOG = logging.getLogger("confluence_export")
 
@@ -40,6 +40,7 @@ def write_page_map(output_dir: Path, root_page_id: str, pages_by_id: Dict[str, d
         "pages": {
             page["markdown_path"].relative_to(output_dir).as_posix(): str(page_id)
             for page_id, page in sorted(pages_by_id.items(), key=lambda item: item[1]["markdown_path"].as_posix())
+            if not page.get("export_suppressed")
         },
     }
     map_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -119,6 +120,19 @@ def analytics_windows(today: Optional[date] = None) -> Dict[str, date]:
         "trailing_year": shift_years(today, -1),
         "all_time_proxy": shift_years(today, -10),
     }
+
+
+def analytics_are_current(cached_analytics: dict, today: Optional[date] = None) -> bool:
+    if not isinstance(cached_analytics, dict) or not cached_analytics:
+        return False
+    windows = analytics_windows(today)
+    for label, from_date in windows.items():
+        entry = cached_analytics.get(label)
+        if not isinstance(entry, dict):
+            return False
+        if str(entry.get("from_date")) != from_date.isoformat():
+            return False
+    return True
 
 
 def file_modified_on(path: Path, day: date) -> bool:
@@ -207,6 +221,75 @@ def element_children(node: Tag) -> List[Tag]:
     return [child for child in node.children if isinstance(child, Tag)]
 
 
+def macro_name(node: Tag) -> str:
+    return str(node.get("ac:name", "macro")).strip() or "macro"
+
+
+def macro_parameter(node: Tag, name: str) -> str:
+    parameter = node.find("ac:parameter", attrs={"ac:name": name})
+    return parameter.get_text(" ", strip=True) if parameter else ""
+
+
+def render_rich_text_children(node: Optional[Tag], context: dict) -> str:
+    if node is None:
+        return ""
+    return "".join(render_block(child, context) for child in node.children).strip()
+
+
+def render_inline_children(node: Optional[Tag], context: dict) -> str:
+    if node is None:
+        return ""
+    return "".join(inline_text(child, context) for child in node.children).strip()
+
+
+def render_placeholder(node: Tag) -> str:
+    text = node.get_text(" ", strip=True)
+    if not text:
+        text = str(node.get("ac:placeholder", "")).strip()
+    if not text:
+        return ""
+    return f"_Placeholder: {text}_"
+
+
+def add_unresolved_link(
+    context: dict,
+    *,
+    kind: str,
+    category: str,
+    reason: str,
+    source_text: Optional[str] = None,
+    target_title: Optional[str] = None,
+    target_id: Optional[str] = None,
+    target_space: Optional[str] = None,
+    attachment_filename: Optional[str] = None,
+    fallback_url: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> None:
+    page_info = context["page"]
+    entry = {
+        "page": page_info["title"],
+        "page_id": page_info["id"],
+        "kind": kind,
+        "category": category,
+        "reason": reason,
+    }
+    if source_text:
+        entry["source_text"] = source_text
+    if target_title:
+        entry["target_title"] = target_title
+    if target_id:
+        entry["target_id"] = str(target_id)
+    if target_space:
+        entry["target_space"] = target_space
+    if attachment_filename:
+        entry["attachment_filename"] = attachment_filename
+    if fallback_url:
+        entry["fallback_url"] = fallback_url
+    if detail:
+        entry["detail"] = detail
+    context["report"]["unresolved_links"].append(entry)
+
+
 def rewrite_plain_href(href: str, context: dict) -> str:
     parsed = urlparse(href)
     page_id = None
@@ -242,6 +325,12 @@ def inline_text(node, context: dict) -> str:
         return render_confluence_link(node, context)
     if name == "ac:image":
         return render_confluence_image(node, context)
+    if name == "ac:placeholder":
+        return render_placeholder(node)
+    if name == "ac:task-list":
+        return render_task_list(node, context).strip()
+    if name == "ac:structured-macro":
+        return render_macro(node, context).strip()
     if name.startswith("ac:") or name.startswith("ri:"):
         return render_unsupported_inline(node, context)
     return "".join(inline_text(child, context) for child in node.children)
@@ -323,10 +412,15 @@ def render_block(node, context: dict) -> str:
         return "---\n\n"
     if name == "ac:image":
         return render_confluence_image(node, context) + "\n\n"
+    if name == "ac:placeholder":
+        placeholder = render_placeholder(node)
+        return placeholder + "\n\n" if placeholder else ""
     if name == "ac:structured-macro":
-        return render_macro(node)
-    if name == "ac:layout":
+        return render_macro(node, context)
+    if name in {"ac:layout", "ac:layout-section", "ac:layout-cell"}:
         return "".join(render_block(child, context) for child in node.children)
+    if name == "ac:task-list":
+        return render_task_list(node, context)
     if name in {"div", "span", "section", "article", "tbody", "thead", "tr", "td", "th"}:
         return "".join(render_block(child, context) for child in node.children)
     if name == "ac:link":
@@ -382,23 +476,182 @@ def render_unsupported_inline(node: Tag, context: dict, kind: str = "embed", con
     return f"`[unsupported {content_type}; see {marker_id}]`"
 
 
-def render_macro(node: Tag) -> str:
-    macro_name = node.get("ac:name", "macro")
-    if macro_name in {"code", "noformat"}:
+def render_status_macro(node: Tag) -> str:
+    title = macro_parameter(node, "title") or macro_parameter(node, "colour") or "Unknown"
+    return f"`Status: {title}`"
+
+
+def render_children_macro(node: Tag, context: dict) -> str:
+    page_info = context["page"]
+    style = macro_parameter(node, "style")
+    sort = macro_parameter(node, "sort")
+    qualifiers: List[str] = []
+    if style:
+        qualifiers.append(f"style `{style}`")
+    if sort:
+        qualifiers.append(f"sort `{sort}`")
+    detail = ", ".join(qualifiers)
+    suffix = f" ({detail})" if detail else ""
+    return f"> Child page listing omitted in export{suffix}.\n\n"
+
+
+def render_toc_macro(node: Tag) -> str:
+    return ""
+
+
+def render_info_macro(node: Tag, context: dict) -> str:
+    rich_body = node.find("ac:rich-text-body")
+    content = render_rich_text_children(rich_body, context)
+    if not content:
+        return ""
+    lines = ["> Info"]
+    lines.extend(f"> {line}" if line else ">" for line in content.splitlines())
+    return "\n".join(lines) + "\n\n"
+
+
+def render_details_macro(node: Tag, context: dict) -> str:
+    label = macro_parameter(node, "label") or "Details"
+    rich_body = node.find("ac:rich-text-body")
+    content = render_rich_text_children(rich_body, context)
+    if not content:
+        return f"### {label}\n\n"
+    return f"### {label}\n\n{content}\n\n"
+
+
+def render_task_list(node: Tag, context: dict) -> str:
+    lines: List[str] = []
+    for task in node.find_all("ac:task", recursive=False):
+        status = task.find("ac:task-status")
+        checked = (status.get_text(strip=True).lower() == "complete") if status else False
+        body = task.find("ac:task-body")
+        body_text = (render_inline_children(body, context) or body.get_text(" ", strip=True)) if body else ""
+        body_text = body_text.strip()
+        if body_text:
+            lines.append(f"- [{'x' if checked else ' '}] {body_text}")
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n\n"
+
+
+def render_view_file_macro(node: Tag, context: dict) -> str:
+    attachment = node.find("ri:attachment")
+    page_info = context["page"]
+    client = context["client"]
+    if attachment:
+        filename = attachment.get("ri:filename")
+        if filename:
+            asset_path = download_attachment_for_page(client, page_info, filename)
+            if asset_path:
+                href = relative_asset_link(page_info, asset_path)
+                return f"[{filename}]({href})"
+    return render_unsupported_block(
+        node,
+        context,
+        kind="macro",
+        content_type="view-file",
+        detail="Unsupported Confluence macro `view-file` without a usable attachment reference",
+    )
+
+
+def render_jira_macro(node: Tag, context: dict) -> str:
+    key = macro_parameter(node, "key")
+    server = macro_parameter(node, "server")
+    base_url = str(context.get("base_url", "")).rstrip("/")
+    if key and base_url:
+        href = f"{base_url}/browse/{key}"
+        label = key if not server else f"{key} ({server})"
+        return f"[{label}]({href})"
+    return render_unsupported_block(
+        node,
+        context,
+        kind="macro",
+        content_type="jira",
+        detail="Unsupported Confluence macro `jira` without a usable issue key",
+    )
+
+
+def render_lucidchart_macro(node: Tag, context: dict) -> str:
+    title = macro_parameter(node, "title") or macro_parameter(node, "name") or "Lucidchart diagram"
+    url = (
+        macro_parameter(node, "url")
+        or macro_parameter(node, "link")
+        or macro_parameter(node, "src")
+        or macro_parameter(node, "documentUrl")
+    )
+    lc_id = macro_parameter(node, "lcId") or macro_parameter(node, "id")
+    if url:
+        return f"[{title}]({url})"
+    if lc_id:
+        view_url = f"https://lucid.app/lucidchart/{lc_id}/view"
+        edit_url = f"https://lucid.app/lucidchart/{lc_id}/edit"
+        return f"{title}: [view]({view_url}) ([edit]({edit_url}))"
+    detail = "Unsupported Confluence macro `lucidchart`"
+    if lc_id:
+        detail += f" with lcId `{lc_id}`"
+    return render_unsupported_block(
+        node,
+        context,
+        kind="macro",
+        content_type="lucidchart",
+        detail=detail,
+    )
+
+
+def render_gliffy_macro(node: Tag, context: dict) -> str:
+    title = macro_parameter(node, "name") or macro_parameter(node, "title") or "Gliffy diagram"
+    url = (
+        macro_parameter(node, "url")
+        or macro_parameter(node, "link")
+        or macro_parameter(node, "viewerUrl")
+        or macro_parameter(node, "editUrl")
+    )
+    if url:
+        return f"[{title}]({url})"
+    macro_id = macro_parameter(node, "macroId") or macro_parameter(node, "id")
+    detail = "Unsupported Confluence macro `gliffy`"
+    if macro_id:
+        detail += f" with macroId `{macro_id}`"
+    return render_unsupported_block(
+        node,
+        context,
+        kind="macro",
+        content_type="gliffy",
+        detail=detail,
+    )
+
+
+def render_macro(node: Tag, context: dict) -> str:
+    name = macro_name(node)
+    if name in {"code", "noformat"}:
         body = node.find("ac:plain-text-body")
         if body:
             return f"```text\n{body.get_text()}\n```\n\n"
-    context = getattr(render_macro, "_context", None)
-    if context is None:
-        return f"> Unsupported Confluence macro `{macro_name}`\n\n"
+    if name == "status":
+        return render_status_macro(node)
+    if name == "children":
+        return render_children_macro(node, context)
+    if name == "toc":
+        return render_toc_macro(node)
+    if name == "info":
+        return render_info_macro(node, context)
+    if name == "details":
+        return render_details_macro(node, context)
+    if name == "view-file":
+        return render_view_file_macro(node, context)
+    if name == "jira":
+        return render_jira_macro(node, context)
+    if name == "lucidchart":
+        return render_lucidchart_macro(node, context)
+    if name == "gliffy":
+        return render_gliffy_macro(node, context)
     body = node.find("ac:plain-text-body")
     rich_body = node.find("ac:rich-text-body")
-    detail = f"Unsupported Confluence macro `{macro_name}`"
+    detail = f"Unsupported Confluence macro `{name}`"
     if body and body.get_text(strip=True):
         detail += f" with plain text body `{body.get_text(strip=True)[:80]}`"
     elif rich_body and rich_body.get_text(" ", strip=True):
         detail += f" with rich text body `{rich_body.get_text(' ', strip=True)[:80]}`"
-    return render_unsupported_block(node, context, kind="macro", content_type=macro_name, detail=detail)
+    return render_unsupported_block(node, context, kind="macro", content_type=name, detail=detail)
 
 
 def relative_markdown_link(from_page: dict, to_page: dict) -> str:
@@ -452,7 +705,14 @@ def download_attachment_for_page(client: ConfluenceClient, page_info: dict, file
             return None
         try:
             client.download_attachment(attachment["download"], destination)
-            page_info["report"]["downloaded_attachments"].append(f"{page_info['title']}: {local_filename} -> {destination}")
+            page_info["report"]["downloaded_attachments"].append(
+                {
+                    "page": page_info["title"],
+                    "page_path": str(page_markdown_path(page_info)),
+                    "filename": local_filename,
+                    "destination": str(destination),
+                }
+            )
         except requests.HTTPError as exc:
             page_info["report"]["warnings"].append(
                 f"Failed to download attachment for {page_info['title']}: {filename} ({exc})"
@@ -473,12 +733,14 @@ def render_confluence_image(node: Tag, context: dict) -> str:
             if asset_path:
                 alt = node.get("ac:alt") or filename
                 return f"![{alt}]({relative_asset_link(page_info, asset_path)})"
-            context["report"]["unresolved_links"].append(
-                {
-                    "page": page_info["title"],
-                    "kind": "image",
-                    "detail": f"missing attachment image {filename}",
-                }
+            add_unresolved_link(
+                context,
+                kind="image",
+                category="unresolved",
+                reason="missing-attachment-image",
+                source_text=node.get("ac:alt") or filename,
+                attachment_filename=filename,
+                detail=f"missing attachment image {filename}",
             )
     if url_node and url_node.get("ri:value"):
         url = url_node["ri:value"]
@@ -504,32 +766,55 @@ def render_confluence_link(node: Tag, context: dict) -> str:
     url_ref = node.find("ri:url")
 
     if page_ref:
+        target_space = page_ref.get("ri:space-key") or page_ref.get("ri:spacekey")
         target_id = page_ref.get("ri:content-id")
         if not target_id:
             title = page_ref.get("ri:content-title")
             if title:
                 target_id = title_to_id.get(title)
         if target_id and target_id in export_pages:
-            href = relative_markdown_link(page_info, export_pages[target_id])
-            return f"[{link_text or export_pages[target_id]['title']}]({href})"
+            target_page = export_pages[target_id]
+            if target_page.get("export_suppressed"):
+                href = target_page.get("page_url") or f"{context['base_url']}/wiki/pages/viewpage.action?pageId={target_id}"
+                add_unresolved_link(
+                    context,
+                    kind="page",
+                    category="out-of-scope",
+                    reason="suppressed-root-page",
+                    source_text=link_text or target_page.get("title") or href,
+                    target_id=str(target_id),
+                    target_title=target_page.get("title"),
+                    fallback_url=href,
+                    detail=f"{link_text or href} -> suppressed root page {href}",
+                )
+                return f"[{link_text or target_page.get('title') or href}]({href})"
+            href = relative_markdown_link(page_info, target_page)
+            return f"[{link_text or target_page['title']}]({href})"
         if target_id:
             href = f"{context['base_url']}/wiki/pages/viewpage.action?pageId={target_id}"
-            context["report"]["unresolved_links"].append(
-                {
-                    "page": page_info["title"],
-                    "kind": "page",
-                    "detail": f"{link_text or href} -> {href}",
-                }
+            add_unresolved_link(
+                context,
+                kind="page",
+                category="cross-space" if target_space and target_space != page_info.get("space_key") else "out-of-scope",
+                reason="outside-export-scope",
+                source_text=link_text or href,
+                target_id=str(target_id),
+                target_space=target_space,
+                fallback_url=href,
+                detail=f"{link_text or href} -> {href}",
             )
             return f"[{link_text or href}]({href})"
         title = page_ref.get("ri:content-title")
         if title:
-            context["report"]["unresolved_links"].append(
-                {
-                    "page": page_info["title"],
-                    "kind": "page",
-                    "detail": f"{link_text or title} -> unresolved title {title}",
-                }
+            add_unresolved_link(
+                context,
+                kind="page",
+                category="cross-space" if target_space and target_space != page_info.get("space_key") else "unresolved",
+                reason="unresolved-title",
+                source_text=link_text or title,
+                target_title=title,
+                target_space=target_space,
+                detail=f"{link_text or title} -> unresolved title {title}",
             )
             return f"[{link_text or title}]({title})"
 
@@ -540,12 +825,14 @@ def render_confluence_link(node: Tag, context: dict) -> str:
             if asset_path:
                 href = relative_asset_link(page_info, asset_path)
                 return f"[{link_text or filename}]({href})"
-            context["report"]["unresolved_links"].append(
-                {
-                    "page": page_info["title"],
-                    "kind": "attachment",
-                    "detail": f"{link_text or filename} -> missing attachment {filename}",
-                }
+            add_unresolved_link(
+                context,
+                kind="attachment",
+                category="unresolved",
+                reason="missing-attachment",
+                source_text=link_text or filename,
+                attachment_filename=filename,
+                detail=f"{link_text or filename} -> missing attachment {filename}",
             )
 
     if url_ref and url_ref.get("ri:value"):
@@ -559,7 +846,6 @@ def render_confluence_link(node: Tag, context: dict) -> str:
 
 
 def storage_to_markdown(storage_html: str, context: dict) -> str:
-    render_macro._context = context
     soup = BeautifulSoup(storage_html, "html.parser")
     body_parts = [render_block(child, context) for child in soup.contents]
     body = squash_blank_lines("".join(body_parts))
@@ -589,7 +875,7 @@ def collect_pages(
     excluded_hits: List[str] = []
 
     def walk(page_id: str) -> None:
-        if page_id in excluded_page_ids:
+        if page_id in excluded_page_ids and page_id != root_id:
             excluded_hits.append(page_id)
             return
         if page_id in pages_by_id:
@@ -615,6 +901,7 @@ def collect_pages(
                 for result in page.get("metadata", {}).get("labels", {}).get("results", [])
                 if result.get("name")
             ],
+            "export_suppressed": page_id == root_id and page_id in excluded_page_ids,
         }
         children_by_id[page_id] = []
         if not recurse and page_id != root_id:
@@ -635,6 +922,9 @@ def collect_pages(
 
 def enrich_attachments(client: ConfluenceClient, pages_by_id: Dict[str, dict]) -> None:
     for page_id, page_info in pages_by_id.items():
+        if page_info.get("export_suppressed"):
+            page_info["attachments"] = []
+            continue
         attachments = []
         for attachment in client.get_attachments(page_id):
             filename = read_attachment_filename(attachment)
@@ -655,6 +945,18 @@ def enrich_attachments(client: ConfluenceClient, pages_by_id: Dict[str, dict]) -
 def enrich_analytics(client: ConfluenceClient, pages_by_id: Dict[str, dict], report: dict) -> None:
     windows = analytics_windows()
     for page_id, page_info in pages_by_id.items():
+        if page_info.get("export_suppressed"):
+            page_info["analytics"] = {}
+            continue
+        cached_analytics = page_info.get("cached_metadata_entry", {}).get("analytics", {})
+        if (
+            not report.get("force")
+            and page_info.get("reuse_cached_metadata")
+            and analytics_are_current(cached_analytics)
+        ):
+            page_info["analytics"] = cached_analytics
+            report.setdefault("analytics_cache_hits", []).append(f"{page_info['title']} ({page_id})")
+            continue
         analytics: Dict[str, dict] = {}
         for label, from_date in windows.items():
             try:
@@ -679,6 +981,7 @@ def enrich_analytics(client: ConfluenceClient, pages_by_id: Dict[str, dict], rep
 
 
 def export_metadata_for_page(page_info: dict, report: dict) -> dict:
+    cached_metadata = page_info.get("cached_metadata_entry", {})
     page_id = str(page_info["id"])
     unsupported = [entry for entry in report.get("unsupported_content", []) if str(entry.get("page_id")) == page_id]
     unresolved = [entry for entry in report.get("unresolved_links", []) if entry.get("page") == page_info["title"]]
@@ -707,8 +1010,8 @@ def export_metadata_for_page(page_info: dict, report: dict) -> dict:
                 "media_type": attachment.get("media_type"),
             }
             for attachment in page_info.get("attachments", [])
-        ],
-        "analytics": page_info.get("analytics", {}),
+        ] or cached_metadata.get("attachment_details", []),
+        "analytics": page_info.get("analytics", {}) or cached_metadata.get("analytics", {}),
         "unsupported_content_count": len(unsupported),
         "unsupported_content_ids": [entry["id"] for entry in unsupported],
         "unresolved_link_count": len(unresolved),
@@ -719,6 +1022,8 @@ def export_metadata_for_page(page_info: dict, report: dict) -> dict:
 def export_metadata_manifest(output_dir: Path, pages_by_id: Dict[str, dict], report: dict) -> dict:
     pages = []
     for page_id, page_info in sorted(pages_by_id.items(), key=lambda item: item[1]["markdown_path"].as_posix()):
+        if page_info.get("export_suppressed"):
+            continue
         entry = export_metadata_for_page(page_info, report)
         entry["markdown_relative_path"] = page_info["markdown_path"].relative_to(output_dir).as_posix()
         pages.append(entry)
@@ -731,6 +1036,8 @@ def export_metadata_manifest(output_dir: Path, pages_by_id: Dict[str, dict], rep
 
 
 def apply_export_cache(pages_by_id: Dict[str, dict], output_dir: Path, report: dict) -> None:
+    if report.get("force"):
+        return
     manifest_index = load_existing_metadata_index(output_dir)
     today = date.today()
     for page_id, page_info in pages_by_id.items():
@@ -749,6 +1056,8 @@ def apply_export_cache(pages_by_id: Dict[str, dict], output_dir: Path, report: d
         live_version = page_info.get("version_number")
         if str(cached_version) != str(live_version):
             continue
+        page_info["cached_metadata_entry"] = cached_entry
+        page_info["reuse_cached_metadata"] = True
         if not markdown_path.exists():
             continue
         if "content-block" in page_info.get("metadata_outputs", []) and not file_modified_on(markdown_path, today):
@@ -828,6 +1137,11 @@ def write_pages(client: ConfluenceClient, pages_by_id: Dict[str, dict], output_d
     title_to_id = {page["title"]: page_id for page_id, page in pages_by_id.items()}
     for page_id, page_info in pages_by_id.items():
         markdown_path = page_info["markdown_path"]
+        if page_info.get("export_suppressed"):
+            page_info["report"].setdefault("skipped_pages", []).append(
+                f"{page_info['title']} (page {page_id}, root page content suppressed)"
+            )
+            continue
         markdown_path.parent.mkdir(parents=True, exist_ok=True)
         context = {
             "client": client,
@@ -865,9 +1179,13 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s: %(message)s")
     try:
-        project = load_project_config(Path(args.project).expanduser().resolve())
+        project = load_phase_config(Path(args.project).expanduser().resolve(), PHASE_EXTRACTION)
     except ValueError as exc:
         LOG.error("Could not load project config: %s", exc)
+        raise SystemExit(2)
+
+    if project.get("provider") != "confluence":
+        LOG.error("Project %s uses provider %s, expected %s", args.project, project.get("provider"), "confluence")
         raise SystemExit(2)
 
     if project["activity"] != PROJECT_ACTIVITY_EXPORT:
