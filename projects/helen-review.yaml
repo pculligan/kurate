@@ -1,0 +1,15 @@
+name: helen-review
+workspace: ../helen-help
+phases:
+  extraction:
+    provider: confluence
+    activity: export
+    metadata:
+      - file
+
+    spaces:
+      IDD:
+        pages:
+          - id: 1858341516
+            output: .
+            recurse: true
