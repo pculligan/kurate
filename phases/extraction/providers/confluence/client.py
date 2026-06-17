@@ -20,6 +20,9 @@ class ConfluenceClient:
     def _api(self, path: str) -> str:
         return f"{self.base_url}/wiki/rest/api{path}"
 
+    def _api_v2(self, path: str) -> str:
+        return f"{self.base_url}/wiki/api/v2{path}"
+
     def _raise_for_status(self, response) -> None:
         try:
             response.raise_for_status()
@@ -96,6 +99,41 @@ class ConfluenceClient:
             if not payload.get("size", 0):
                 break
         return results
+
+    def _get_cursor_results(self, initial_url: str) -> List[dict]:
+        results: List[dict] = []
+        url = initial_url
+        while url:
+            response = requests.get(url, auth=self._auth())
+            self._raise_for_status(response)
+            payload = response.json()
+            results.extend(payload.get("results", []))
+            next_url = payload.get("_links", {}).get("next")
+            if next_url and str(next_url).startswith("http"):
+                url = str(next_url)
+            elif next_url and str(next_url).startswith("/"):
+                url = urljoin(self.base_url, str(next_url))
+            elif next_url:
+                url = urljoin(f"{self.base_url}/wiki/api/v2/", str(next_url))
+            else:
+                url = ""
+        return results
+
+    def get_folder(self, folder_id: str) -> dict:
+        url = self._api_v2(f"/folders/{requests.utils.quote(str(folder_id))}")
+        response = requests.get(url, auth=self._auth())
+        self._raise_for_status(response)
+        return response.json()
+
+    def get_direct_children(self, content_id: str, content_type: str) -> List[dict]:
+        normalized_type = content_type.strip().lower()
+        if normalized_type == "page":
+            path = f"/pages/{requests.utils.quote(str(content_id))}/direct-children?limit=200"
+        elif normalized_type == "folder":
+            path = f"/folders/{requests.utils.quote(str(content_id))}/direct-children?limit=200"
+        else:
+            return []
+        return self._get_cursor_results(self._api_v2(path))
 
     def list_all_descendants(self, root_id: str) -> List[dict]:
         out = []

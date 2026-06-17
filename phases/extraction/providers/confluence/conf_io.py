@@ -135,8 +135,8 @@ def sync_to_confluence(project: Dict[str, Any], identity_overrides: Dict[str, Op
     dir_readmes = {}
     for path in list(pages.keys()):
         directory = path.parent
-        readme = directory / "readme.md"
-        if readme in pages:
+        readme = helpers.find_directory_readme(pages, directory)
+        if readme is not None:
             dir_readmes[directory] = readme
         elif directory not in dir_readmes:
             dir_readmes[directory] = None
@@ -148,11 +148,11 @@ def sync_to_confluence(project: Dict[str, Any], identity_overrides: Dict[str, Op
     for directory in dirs:
         if directory == source:
             continue
-        readme = directory / "readme.md"
-        title = pages[readme]["title"] if readme in pages else (directory.name if directory.name else "root")
+        readme = dir_readmes.get(directory)
+        title = pages[readme]["title"] if readme is not None else (directory.name if directory.name else "root")
         chosen_parent = dir_pageid.get(directory.parent, root_page_id)
         mapped_page_id = None
-        if readme in pages:
+        if readme is not None:
             mapped_entry = existing_page_map.get(helpers.relative_source_path(readme, source), {})
             mapped_page_id = mapped_entry.get("page_id")
 
@@ -316,7 +316,8 @@ def sync_to_confluence(project: Dict[str, Any], identity_overrides: Dict[str, Op
 
         existing = client.get_page(page_id)
         existing_version = existing.get("version", {}).get("number", 1)
-        page_title_for_update = existing.get("title", root_page_title) if path == source / "readme.md" else title
+        root_readme = dir_readmes.get(source)
+        page_title_for_update = existing.get("title", root_page_title) if root_readme is not None and path == root_readme else title
         if (
             mapped_entry.get("page_id") == str(page_id)
             and mapped_entry.get("content_hash") == body_hash
@@ -335,7 +336,16 @@ def sync_to_confluence(project: Dict[str, Any], identity_overrides: Dict[str, Op
             mapped_entry["confluence_version"] = existing_version
         else:
             helpers.LOG.info("Updating page %s (id=%s) to version %s", title, page_id, existing_version + 1)
-            client.update_page(page_id, page_title_for_update, body_storage, existing_version + 1)
+            try:
+                client.update_page(page_id, page_title_for_update, body_storage, existing_version + 1)
+            except requests.HTTPError as exc:
+                conflict_message = (
+                    f"Failed to update {helpers.relative_source_path(path, source)} "
+                    f"as '{page_title_for_update}' on Confluence page {page_id}: {exc}"
+                )
+                helpers.LOG.error(conflict_message)
+                report["conflicts"].append(conflict_message)
+                return finalize(4)
             report["updated_pages"].append(f"{page_title_for_update} ({page_id}) -> version {existing_version + 1}")
             mapped_entry["content_hash"] = body_hash
             mapped_entry["confluence_version"] = existing_version + 1

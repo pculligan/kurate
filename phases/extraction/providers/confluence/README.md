@@ -3,7 +3,7 @@
 This provider implements the extraction phase's Confluence-specific workflows:
 
 - `publish`: push a local Markdown tree into Confluence
-- `export`: pull a Confluence page tree into a local Markdown workspace
+- `export`: pull a Confluence page or folder tree into a local Markdown workspace
 
 ## What This Repo Does
 
@@ -15,7 +15,7 @@ This provider implements the extraction phase's Confluence-specific workflows:
 - Rewrites relative Markdown links to Confluence page links when the target page is part of the same sync.
 - Writes a `confluence-map.json` manifest so later runs can update pages by stable page id.
 - If the source folder is a git repo, attempts to stage and commit `confluence-map.json` automatically.
-- Pulls a Confluence page tree into a local folder tree.
+- Pulls a Confluence page or folder tree into a local folder tree.
 - Writes page content as Markdown.
 - Downloads attachments referenced by exported pages.
 - Rewrites internal Confluence page links to relative Markdown links when possible.
@@ -164,6 +164,8 @@ Notes:
 - Export projects may define multiple spaces and multiple pages per space.
 - Export page targets may define `excludes` to skip specific page ids and their descendants.
 - If the root export page id appears in `excludes`, it is used as the traversal anchor but its own content is not written.
+- Export page targets may use either a Confluence page id or a Confluence folder id as `id`.
+- Recursive exports traverse Confluence content-tree folders and pages. Folders are exported as local directories only; they do not produce Markdown files because they do not have page body content.
 - Each export page target runs independently and is summarized in the project report.
 
 ## Sync A Local Repo To Confluence
@@ -231,7 +233,7 @@ Other suite phases that commonly follow extraction:
 - `confluence-map.json`: stable page-id manifest written into the source or output tree
 - `*.metadata.json`: optional export metadata files such as page sidecars or `export.metadata.json`
 - `reports/*.md`: timestamped reports named as `[project]-[date]-[stage-activity].md`
-- Exported pages with children or attachments use `slug/readme.md`, and any local attachments sit beside that `readme.md` in the same folder.
+- Exported pages with children or attachments use `slug/readme.md`, and any local attachments sit beside that `readme.md` in the same folder. Confluence folders become local directories containing their exported descendants.
 
 For publish projects, if the source folder is inside a git repo, the tool will try to stage and commit `confluence-map.json` for you. You should still push that commit afterward.
 

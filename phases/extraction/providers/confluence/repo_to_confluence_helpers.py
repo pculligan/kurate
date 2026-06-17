@@ -81,6 +81,17 @@ def collect_markdown_files(source: Path, ignore_patterns: List[str]) -> List[Pat
     return sorted(out)
 
 
+def find_directory_readme(pages: Dict[Path, dict], directory: Path) -> Optional[Path]:
+    readmes = sorted(
+        path for path in pages
+        if path.parent == directory and path.name.lower() == "readme.md"
+    )
+    for path in readmes:
+        if path.name == "readme.md":
+            return path
+    return readmes[0] if readmes else None
+
+
 def parse_title(md_path: Path) -> Optional[str]:
     text = md_path.read_text(encoding="utf-8")
     for line in text.splitlines():

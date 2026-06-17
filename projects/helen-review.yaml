@@ -1,5 +1,5 @@
 name: helen-review
-workspace: ../helen-help
+workspace: ../helen-help/rev02/original
 phases:
   extraction:
     provider: confluence
@@ -8,8 +8,8 @@ phases:
       - file
 
     spaces:
-      IDD:
+      GACS:
         pages:
-          - id: 1858341516
+          - id: 2064319106
             output: .
             recurse: true

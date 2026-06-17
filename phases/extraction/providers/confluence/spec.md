@@ -114,8 +114,8 @@ The preferred model is:
 
 - one project file can cover multiple Confluence spaces
 - each space can define multiple page exports
-- each page export can decide its own local output path
-- each page export can decide whether recursion is enabled
+- each page or folder export can decide its own local output path
+- each page or folder export can decide whether recursion is enabled
 
 Recommended shape:
 
@@ -182,6 +182,7 @@ Behavior:
 - each page entry is exported as an independent target
 - the same project file may export pages from multiple spaces in one run
 - the export workflow should not require a space key for API correctness, but the grouped `spaces` structure is still useful for reviewability and validation
+- page entry `id` values may refer to Confluence pages or Confluence folders
 - each page entry should be allowed to set `recurse` independently
 - each page entry may define `excludes` as a list of Confluence page ids that must not be exported
 - excluded page ids must not be written locally and the exporter must not recurse below them
@@ -256,8 +257,9 @@ The export flow is designed to pull a Confluence page tree into a local Markdown
 
 Current behavior:
 
-- Export a root Confluence page into a target output directory.
-- When `--recurse` is provided, recursively export child pages.
+- Export a root Confluence page or folder into a target output directory.
+- When `--recurse` is provided, recursively export child pages and folder descendants.
+- Confluence folders become local directories only; they do not write Markdown files.
 - Pages with children become folders containing a `readme.md`.
 - Leaf pages with attachments also become folders containing a `readme.md`.
 - Leaf pages without attachments remain Markdown files.

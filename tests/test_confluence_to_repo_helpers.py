@@ -11,6 +11,8 @@ class FakeClient:
         self.base_url = "https://example.atlassian.net"
         self.downloads: list[tuple[str, Path]] = []
         self.pages: dict[str, dict] = {}
+        self.folders: dict[str, dict] = {}
+        self.direct_children_by_node: dict[tuple[str, str], list[dict]] = {}
         self.pages_by_title: dict[tuple[str, str], dict] = {}
         self.attachments_by_page: dict[str, list[dict]] = {}
 
@@ -20,7 +22,17 @@ class FakeClient:
         self.downloads.append((download_path, destination))
 
     def get_page(self, page_id: str, expand: str = "body.storage,version,ancestors") -> dict:
+        if page_id not in self.pages:
+            raise helpers.requests.HTTPError(f"page not found: {page_id}")
         return self.pages[page_id]
+
+    def get_folder(self, folder_id: str) -> dict:
+        if folder_id not in self.folders:
+            raise helpers.requests.HTTPError(f"folder not found: {folder_id}")
+        return self.folders[folder_id]
+
+    def get_direct_children(self, content_id: str, content_type: str) -> list[dict]:
+        return self.direct_children_by_node.get((content_id, content_type), [])
 
     def find_page(self, space: str, title: str) -> dict | None:
         return self.pages_by_title.get((space, title))
@@ -270,6 +282,130 @@ class ConfluenceToRepoHelpersTests(unittest.TestCase):
 
         self.assertEqual(existing_file.parent.resolve(), pages_by_id["child"]["folder_path"])
         self.assertEqual(existing_file.resolve(), pages_by_id["child"]["markdown_path"])
+
+    def test_collect_pages_recurses_through_confluence_folders(self) -> None:
+        client = FakeClient()
+        client.pages = {
+            "root": {
+                "id": "root",
+                "title": "Root",
+                "body": {"storage": {"value": "<p>Root body</p>"}},
+                "space": {"key": "IDD"},
+                "version": {"number": 1},
+            },
+            "leaf": {
+                "id": "leaf",
+                "title": "Leaf",
+                "body": {"storage": {"value": "<p>Leaf body</p>"}},
+                "space": {"key": "IDD"},
+                "version": {"number": 2},
+            },
+        }
+        client.folders = {
+            "folder": {
+                "id": "folder",
+                "type": "folder",
+                "title": "Folder Node",
+                "version": {"number": 1},
+            }
+        }
+        client.direct_children_by_node = {
+            ("root", "page"): [{"id": "folder", "type": "folder", "title": "Folder Node"}],
+            ("folder", "folder"): [{"id": "leaf", "type": "page", "title": "Leaf"}],
+        }
+
+        pages_by_id, children_by_id, excluded = helpers.collect_pages(
+            client,
+            "root",
+            recurse=True,
+            excluded_page_ids=set(),
+            default_space_key="IDD",
+        )
+
+        self.assertEqual([], excluded)
+        self.assertEqual(["folder"], children_by_id["root"])
+        self.assertEqual(["leaf"], children_by_id["folder"])
+        self.assertTrue(pages_by_id["folder"]["export_suppressed"])
+        self.assertEqual("folder", pages_by_id["folder"]["content_type"])
+        self.assertEqual("page", pages_by_id["leaf"]["content_type"])
+
+    def test_collect_pages_can_target_folder_root(self) -> None:
+        client = FakeClient()
+        client.folders = {
+            "folder": {
+                "id": "folder",
+                "type": "folder",
+                "title": "Folder Root",
+                "version": {"number": 1},
+            }
+        }
+        client.pages = {
+            "leaf": {
+                "id": "leaf",
+                "title": "Leaf",
+                "body": {"storage": {"value": "<p>Leaf body</p>"}},
+                "space": {"key": "IDD"},
+                "version": {"number": 2},
+            },
+        }
+        client.direct_children_by_node = {
+            ("folder", "folder"): [{"id": "leaf", "type": "page", "title": "Leaf"}],
+        }
+
+        pages_by_id, children_by_id, excluded = helpers.collect_pages(
+            client,
+            "folder",
+            recurse=True,
+            excluded_page_ids=set(),
+            default_space_key="IDD",
+        )
+
+        self.assertEqual([], excluded)
+        self.assertEqual(["leaf"], children_by_id["folder"])
+        self.assertTrue(pages_by_id["folder"]["export_suppressed"])
+        self.assertEqual("Folder Root", pages_by_id["folder"]["title"])
+        self.assertEqual("Leaf", pages_by_id["leaf"]["title"])
+
+    def test_collect_pages_treats_non_page_content_payload_as_folder(self) -> None:
+        client = FakeClient()
+        client.pages = {
+            "folder": {
+                "id": "folder",
+                "type": "folder",
+                "title": "Folder Root From Content API",
+            },
+            "leaf": {
+                "id": "leaf",
+                "title": "Leaf",
+                "body": {"storage": {"value": "<p>Leaf body</p>"}},
+                "space": {"key": "IDD"},
+                "version": {"number": 2},
+            },
+        }
+        client.folders = {
+            "folder": {
+                "id": "folder",
+                "type": "folder",
+                "title": "Folder Root",
+                "version": {"number": 1},
+            }
+        }
+        client.direct_children_by_node = {
+            ("folder", "folder"): [{"id": "leaf", "type": "page", "title": "Leaf"}],
+        }
+
+        pages_by_id, children_by_id, excluded = helpers.collect_pages(
+            client,
+            "folder",
+            recurse=True,
+            excluded_page_ids=set(),
+            default_space_key="IDD",
+        )
+
+        self.assertEqual([], excluded)
+        self.assertEqual(["leaf"], children_by_id["folder"])
+        self.assertEqual("folder", pages_by_id["folder"]["content_type"])
+        self.assertEqual("Leaf", pages_by_id["leaf"]["title"])
 
 
 if __name__ == "__main__":

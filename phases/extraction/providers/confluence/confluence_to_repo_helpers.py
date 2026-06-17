@@ -40,7 +40,7 @@ def write_page_map(output_dir: Path, root_page_id: str, pages_by_id: Dict[str, d
         "pages": {
             page["markdown_path"].relative_to(output_dir).as_posix(): str(page_id)
             for page_id, page in sorted(pages_by_id.items(), key=lambda item: item[1]["markdown_path"].as_posix())
-            if not page.get("export_suppressed")
+            if not page.get("export_suppressed") or page.get("content_type") == "folder"
         },
     }
     map_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1196,19 +1196,15 @@ def collect_pages(
     children_by_id: Dict[str, List[str]] = {}
     excluded_hits: List[str] = []
 
-    def walk(page_id: str) -> None:
-        if page_id in excluded_page_ids and page_id != root_id:
-            excluded_hits.append(page_id)
-            return
-        if page_id in pages_by_id:
-            return
-        page = client.get_page(page_id, expand="body.storage,version,ancestors,history,metadata.labels")
-        pages_by_id[page_id] = {
-            "id": page["id"],
+    def page_info_from_page(page: dict, *, export_suppressed: bool = False) -> dict:
+        page_id = str(page["id"])
+        return {
+            "id": page_id,
+            "content_type": "page",
             "title": page["title"],
             "body_storage": page.get("body", {}).get("storage", {}).get("value", ""),
             "space_key": page.get("space", {}).get("key") or default_space_key,
-            "page_url": f"{client.base_url}/wiki/pages/viewpage.action?pageId={page['id']}",
+            "page_url": f"{client.base_url}/wiki/pages/viewpage.action?pageId={page_id}",
             "created_at": page.get("history", {}).get("createdDate"),
             "created_by": page.get("history", {}).get("createdBy", {}).get("displayName"),
             "created_by_account_id": page.get("history", {}).get("createdBy", {}).get("accountId"),
@@ -1223,20 +1219,79 @@ def collect_pages(
                 for result in page.get("metadata", {}).get("labels", {}).get("results", [])
                 if result.get("name")
             ],
-            "export_suppressed": page_id == root_id and page_id in excluded_page_ids,
+            "export_suppressed": export_suppressed,
         }
-        children_by_id[page_id] = []
-        if not recurse and page_id != root_id:
+
+    def page_info_from_folder(folder: dict) -> dict:
+        folder_id = str(folder["id"])
+        return {
+            "id": folder_id,
+            "content_type": "folder",
+            "title": folder.get("title", f"Folder {folder_id}"),
+            "body_storage": "",
+            "space_key": default_space_key,
+            "page_url": f"{client.base_url}/wiki/spaces/{default_space_key}/folder/{folder_id}" if default_space_key else "",
+            "created_at": folder.get("createdAt"),
+            "created_by": None,
+            "created_by_account_id": folder.get("authorId"),
+            "updated_at": folder.get("version", {}).get("createdAt"),
+            "updated_by": None,
+            "updated_by_account_id": folder.get("version", {}).get("authorId"),
+            "version_number": folder.get("version", {}).get("number"),
+            "ancestor_ids": [],
+            "ancestor_titles": [],
+            "labels": [],
+            "attachments": [],
+            "cached_attachments_by_filename": {},
+            "export_suppressed": True,
+        }
+
+    def load_content(content_id: str, hinted_type: Optional[str] = None) -> tuple[dict, str]:
+        normalized_hint = str(hinted_type or "").strip().lower()
+        if normalized_hint == "folder":
+            return page_info_from_folder(client.get_folder(content_id)), "folder"
+        if normalized_hint == "page":
+            page = client.get_page(content_id, expand="body.storage,version,ancestors,history,metadata.labels")
+            return page_info_from_page(
+                page,
+                export_suppressed=content_id == root_id and content_id in excluded_page_ids,
+            ), "page"
+
+        try:
+            page = client.get_page(content_id, expand="body.storage,version,ancestors,history,metadata.labels")
+            if str(page.get("type", "page")).strip().lower() != "page":
+                return page_info_from_folder(client.get_folder(content_id)), "folder"
+            return page_info_from_page(
+                page,
+                export_suppressed=content_id == root_id and content_id in excluded_page_ids,
+            ), "page"
+        except requests.HTTPError:
+            return page_info_from_folder(client.get_folder(content_id)), "folder"
+
+    def walk(content_id: str, hinted_type: Optional[str] = None) -> None:
+        content_id = str(content_id)
+        if content_id in excluded_page_ids and content_id != root_id:
+            excluded_hits.append(content_id)
+            return
+        if content_id in pages_by_id:
+            return
+        page_info, content_type = load_content(content_id, hinted_type)
+        pages_by_id[content_id] = page_info
+        children_by_id[content_id] = []
+        if not recurse and content_id != root_id:
             return
         if recurse:
-            children = client.get_children(page_id)
+            children = client.get_direct_children(content_id, content_type)
             for child in children:
-                child_id = child["id"]
+                child_id = str(child["id"])
                 if child_id in excluded_page_ids:
                     excluded_hits.append(child_id)
                     continue
-                children_by_id[page_id].append(child_id)
-                walk(child_id)
+                child_type = str(child.get("type", "")).strip().lower()
+                if child_type not in {"page", "folder"}:
+                    continue
+                children_by_id[content_id].append(child_id)
+                walk(child_id, child_type)
 
     walk(root_id)
     return pages_by_id, children_by_id, sorted(set(excluded_hits))
@@ -1244,7 +1299,7 @@ def collect_pages(
 
 def enrich_attachments(client: ConfluenceClient, pages_by_id: Dict[str, dict]) -> None:
     for page_id, page_info in pages_by_id.items():
-        if page_info.get("export_suppressed"):
+        if page_info.get("export_suppressed") or page_info.get("content_type") != "page":
             page_info["attachments"] = []
             continue
         attachments = []
@@ -1267,7 +1322,7 @@ def enrich_attachments(client: ConfluenceClient, pages_by_id: Dict[str, dict]) -
 def enrich_analytics(client: ConfluenceClient, pages_by_id: Dict[str, dict], report: dict) -> None:
     windows = analytics_windows()
     for page_id, page_info in pages_by_id.items():
-        if page_info.get("export_suppressed"):
+        if page_info.get("export_suppressed") or page_info.get("content_type") != "page":
             page_info["analytics"] = {}
             continue
         cached_analytics = page_info.get("cached_metadata_entry", {}).get("analytics", {})
@@ -1309,6 +1364,7 @@ def export_metadata_for_page(page_info: dict, report: dict) -> dict:
     unresolved = [entry for entry in report.get("unresolved_links", []) if entry.get("page") == page_info["title"]]
     return {
         "confluence_page_id": page_id,
+        "content_type": page_info.get("content_type", "page"),
         "title": page_info["title"],
         "space_key": page_info.get("space_key"),
         "url": page_info.get("page_url"),
@@ -1363,6 +1419,8 @@ def apply_export_cache(pages_by_id: Dict[str, dict], output_dir: Path, report: d
     manifest_index = load_existing_metadata_index(output_dir)
     today = date.today()
     for page_id, page_info in pages_by_id.items():
+        if page_info.get("export_suppressed") or page_info.get("content_type") != "page":
+            continue
         markdown_path = page_markdown_path(page_info)
         sidecar_path = page_metadata_path(page_info)
         cached_entry = None
@@ -1460,8 +1518,9 @@ def write_pages(client: ConfluenceClient, pages_by_id: Dict[str, dict], output_d
     for page_id, page_info in pages_by_id.items():
         markdown_path = page_info["markdown_path"]
         if page_info.get("export_suppressed"):
+            suppressed_kind = "folder structure" if page_info.get("content_type") == "folder" else "root page content"
             page_info["report"].setdefault("skipped_pages", []).append(
-                f"{page_info['title']} (page {page_id}, root page content suppressed)"
+                f"{page_info['title']} ({page_info.get('content_type', 'page')} {page_id}, {suppressed_kind} only)"
             )
             continue
         markdown_path.parent.mkdir(parents=True, exist_ok=True)

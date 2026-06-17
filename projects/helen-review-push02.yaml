@@ -1,0 +1,18 @@
+name: publish-segment
+workspace: ../helen-help/rev02
+phases:
+  extraction:
+    provider: confluence
+    activity: publish
+
+    source: .
+    space: GACS
+    parent: 2102593579
+    excludes:
+      - drafts/**
+      - archive/**
+      - "**/*.tmp.md"
+      - ai-handoff-primer.md
+      - exported/
+      - old-content/
+    dry_run: false
