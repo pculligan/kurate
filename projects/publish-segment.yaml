@@ -13,6 +13,10 @@ phases:
       - archive/**
       - "**/*.tmp.md"
       - ai-handoff-primer.md
+      - "**ai-primer.md"
       - exported/
       - old-content/
+      - "**v4/presentation"
+      - "**v4/metadata"
+      - "**v4/sources"
     dry_run: false

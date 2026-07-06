@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+import time
 from typing import List, Optional
 from urllib.parse import urljoin
 
 from .deps import requests
+
+DEFAULT_TIMEOUT = (10, 120)
+DEFAULT_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 class ConfluenceClient:
@@ -32,12 +38,60 @@ class ConfluenceClient:
                 raise requests.HTTPError(f"{exc}\nResponse body: {detail}", response=response) from exc
             raise
 
+    def _request(self, method: str, url: str, *, retries: int = DEFAULT_RETRIES, **kwargs):
+        kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = requests.request(method, url, **kwargs)
+                if response.status_code in RETRYABLE_STATUS_CODES and attempt < retries:
+                    time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+                    continue
+                return response
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_exc = exc
+                if attempt >= retries:
+                    raise
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Request retry loop exited without a response")
+
+    def _post_file(self, url: str, file_path: Path, *, data: Optional[dict] = None, retries: int = DEFAULT_RETRIES):
+        headers = {"X-Atlassian-Token": "nocheck"}
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                with open(file_path, "rb") as handle:
+                    files = {"file": (file_path.name, handle, "application/octet-stream")}
+                    response = self._request(
+                        "POST",
+                        url,
+                        auth=self._auth(),
+                        files=files,
+                        data=data,
+                        headers=headers,
+                        retries=1,
+                    )
+                if response.status_code in RETRYABLE_STATUS_CODES and attempt < retries:
+                    time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+                    continue
+                return response
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_exc = exc
+                if attempt >= retries:
+                    raise
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("File upload retry loop exited without a response")
+
     def find_page(self, space: str, title: str) -> Optional[dict]:
         url = self._api(
             f"/content?title={requests.utils.quote(title)}&spaceKey={requests.utils.quote(space)}"
             "&expand=version,body.storage,ancestors"
         )
-        response = requests.get(url, auth=self._auth())
+        response = self._request("GET", url, auth=self._auth())
         self._raise_for_status(response)
         results = response.json().get("results", [])
         return results[0] if results else None
@@ -47,7 +101,7 @@ class ConfluenceClient:
             f"/content?title={requests.utils.quote(title)}&spaceKey={requests.utils.quote(space)}"
             "&expand=version,body.storage,ancestors"
         )
-        response = requests.get(url, auth=self._auth())
+        response = self._request("GET", url, auth=self._auth())
         self._raise_for_status(response)
         return response.json().get("results", [])
 
@@ -60,7 +114,7 @@ class ConfluenceClient:
             "space": {"key": space},
             "body": {"storage": {"value": body_storage, "representation": "storage"}},
         }
-        response = requests.post(url, auth=self._auth(), json=payload)
+        response = self._request("POST", url, auth=self._auth(), json=payload, retries=1)
         self._raise_for_status(response)
         return response.json()
 
@@ -73,13 +127,13 @@ class ConfluenceClient:
             "version": {"number": new_version},
             "body": {"storage": {"value": body_storage, "representation": "storage"}},
         }
-        response = requests.put(url, auth=self._auth(), json=payload)
+        response = self._request("PUT", url, auth=self._auth(), json=payload, retries=1)
         self._raise_for_status(response)
         return response.json()
 
     def get_page(self, page_id: str, expand: str = "body.storage,version,ancestors") -> dict:
         url = self._api(f"/content/{page_id}?expand={expand}")
-        response = requests.get(url, auth=self._auth())
+        response = self._request("GET", url, auth=self._auth())
         self._raise_for_status(response)
         return response.json()
 
@@ -88,7 +142,7 @@ class ConfluenceClient:
         start = 0
         while True:
             url = self._api(f"/content/{page_id}/child/page?limit=200&start={start}&expand={expand}")
-            response = requests.get(url, auth=self._auth())
+            response = self._request("GET", url, auth=self._auth())
             self._raise_for_status(response)
             payload = response.json()
             batch = payload.get("results", [])
@@ -104,7 +158,7 @@ class ConfluenceClient:
         results: List[dict] = []
         url = initial_url
         while url:
-            response = requests.get(url, auth=self._auth())
+            response = self._request("GET", url, auth=self._auth())
             self._raise_for_status(response)
             payload = response.json()
             results.extend(payload.get("results", []))
@@ -121,7 +175,7 @@ class ConfluenceClient:
 
     def get_folder(self, folder_id: str) -> dict:
         url = self._api_v2(f"/folders/{requests.utils.quote(str(folder_id))}")
-        response = requests.get(url, auth=self._auth())
+        response = self._request("GET", url, auth=self._auth())
         self._raise_for_status(response)
         return response.json()
 
@@ -148,10 +202,7 @@ class ConfluenceClient:
 
     def upload_attachment(self, page_id: str, file_path: Path) -> dict:
         url = self._api(f"/content/{page_id}/child/attachment")
-        headers = {"X-Atlassian-Token": "nocheck"}
-        with open(file_path, "rb") as handle:
-            files = {"file": (file_path.name, handle, "application/octet-stream")}
-            response = requests.post(url, auth=self._auth(), files=files, headers=headers)
+        response = self._post_file(url, file_path, retries=1)
         self._raise_for_status(response)
         return response.json()
 
@@ -159,18 +210,14 @@ class ConfluenceClient:
         url = self._api(
             f"/content/{page_id}/child/attachment?filename={requests.utils.quote(filename)}&expand=version"
         )
-        response = requests.get(url, auth=self._auth())
+        response = self._request("GET", url, auth=self._auth())
         self._raise_for_status(response)
         results = response.json().get("results", [])
         return results[0] if results else None
 
     def update_attachment(self, page_id: str, attachment_id: str, file_path: Path) -> dict:
         url = self._api(f"/content/{page_id}/child/attachment/{attachment_id}/data")
-        headers = {"X-Atlassian-Token": "nocheck"}
-        with open(file_path, "rb") as handle:
-            files = {"file": (file_path.name, handle, "application/octet-stream")}
-            data = {"minorEdit": "true"}
-            response = requests.post(url, auth=self._auth(), files=files, data=data, headers=headers)
+        response = self._post_file(url, file_path, data={"minorEdit": "true"})
         self._raise_for_status(response)
         return response.json()
 
@@ -185,7 +232,7 @@ class ConfluenceClient:
         start = 0
         while True:
             url = self._api(f"/content/{page_id}/child/attachment?limit=200&start={start}&expand=version,metadata")
-            response = requests.get(url, auth=self._auth())
+            response = self._request("GET", url, auth=self._auth())
             self._raise_for_status(response)
             payload = response.json()
             batch = payload.get("results", [])
@@ -200,7 +247,7 @@ class ConfluenceClient:
     def download_attachment(self, download_path: str, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         url = urljoin(f"{self.base_url}/wiki/", download_path.lstrip("/"))
-        response = requests.get(url, auth=self._auth(), stream=True)
+        response = self._request("GET", url, auth=self._auth(), stream=True)
         self._raise_for_status(response)
         with destination.open("wb") as handle:
             for chunk in response.iter_content(chunk_size=65536):
@@ -212,7 +259,7 @@ class ConfluenceClient:
             f"/analytics/content/{requests.utils.quote(str(page_id))}/{endpoint}"
             f"?fromDate={from_date.isoformat()}"
         )
-        response = requests.get(url, auth=self._auth())
+        response = self._request("GET", url, auth=self._auth())
         self._raise_for_status(response)
         payload = response.json()
         return int(payload.get("count", 0))

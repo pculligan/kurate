@@ -1191,10 +1191,11 @@ def collect_pages(
     recurse: bool,
     excluded_page_ids: set[str],
     default_space_key: Optional[str] = None,
-) -> tuple[Dict[str, dict], Dict[str, List[str]], List[str]]:
+) -> tuple[Dict[str, dict], Dict[str, List[str]], List[str], List[str]]:
     pages_by_id: Dict[str, dict] = {}
     children_by_id: Dict[str, List[str]] = {}
     excluded_hits: List[str] = []
+    unavailable_hits: List[str] = []
 
     def page_info_from_page(page: dict, *, export_suppressed: bool = False) -> dict:
         page_id = str(page["id"])
@@ -1252,6 +1253,8 @@ def collect_pages(
             return page_info_from_folder(client.get_folder(content_id)), "folder"
         if normalized_hint == "page":
             page = client.get_page(content_id, expand="body.storage,version,ancestors,history,metadata.labels")
+            if str(page.get("type", "page")).strip().lower() != "page":
+                return page_info_from_folder(client.get_folder(content_id)), "folder"
             return page_info_from_page(
                 page,
                 export_suppressed=content_id == root_id and content_id in excluded_page_ids,
@@ -1268,18 +1271,26 @@ def collect_pages(
         except requests.HTTPError:
             return page_info_from_folder(client.get_folder(content_id)), "folder"
 
-    def walk(content_id: str, hinted_type: Optional[str] = None) -> None:
+    def walk(content_id: str, hinted_type: Optional[str] = None) -> bool:
         content_id = str(content_id)
         if content_id in excluded_page_ids and content_id != root_id:
             excluded_hits.append(content_id)
-            return
+            return False
         if content_id in pages_by_id:
-            return
-        page_info, content_type = load_content(content_id, hinted_type)
+            return True
+        try:
+            page_info, content_type = load_content(content_id, hinted_type)
+        except requests.HTTPError as exc:
+            if content_id == root_id:
+                raise
+            content_label = hinted_type or "unknown"
+            unavailable_hits.append(f"{content_id} ({content_label})")
+            LOG.warning("Skipping unavailable Confluence %s %s during collection: %s", content_label, content_id, exc)
+            return False
         pages_by_id[content_id] = page_info
         children_by_id[content_id] = []
         if not recurse and content_id != root_id:
-            return
+            return True
         if recurse:
             children = client.get_direct_children(content_id, content_type)
             for child in children:
@@ -1290,11 +1301,12 @@ def collect_pages(
                 child_type = str(child.get("type", "")).strip().lower()
                 if child_type not in {"page", "folder"}:
                     continue
-                children_by_id[content_id].append(child_id)
-                walk(child_id, child_type)
+                if walk(child_id, child_type):
+                    children_by_id[content_id].append(child_id)
+        return True
 
     walk(root_id)
-    return pages_by_id, children_by_id, sorted(set(excluded_hits))
+    return pages_by_id, children_by_id, sorted(set(excluded_hits)), sorted(set(unavailable_hits))
 
 
 def enrich_attachments(client: ConfluenceClient, pages_by_id: Dict[str, dict]) -> None:

@@ -314,7 +314,7 @@ class ConfluenceToRepoHelpersTests(unittest.TestCase):
             ("folder", "folder"): [{"id": "leaf", "type": "page", "title": "Leaf"}],
         }
 
-        pages_by_id, children_by_id, excluded = helpers.collect_pages(
+        pages_by_id, children_by_id, excluded, unavailable = helpers.collect_pages(
             client,
             "root",
             recurse=True,
@@ -323,6 +323,7 @@ class ConfluenceToRepoHelpersTests(unittest.TestCase):
         )
 
         self.assertEqual([], excluded)
+        self.assertEqual([], unavailable)
         self.assertEqual(["folder"], children_by_id["root"])
         self.assertEqual(["leaf"], children_by_id["folder"])
         self.assertTrue(pages_by_id["folder"]["export_suppressed"])
@@ -352,7 +353,7 @@ class ConfluenceToRepoHelpersTests(unittest.TestCase):
             ("folder", "folder"): [{"id": "leaf", "type": "page", "title": "Leaf"}],
         }
 
-        pages_by_id, children_by_id, excluded = helpers.collect_pages(
+        pages_by_id, children_by_id, excluded, unavailable = helpers.collect_pages(
             client,
             "folder",
             recurse=True,
@@ -361,6 +362,7 @@ class ConfluenceToRepoHelpersTests(unittest.TestCase):
         )
 
         self.assertEqual([], excluded)
+        self.assertEqual([], unavailable)
         self.assertEqual(["leaf"], children_by_id["folder"])
         self.assertTrue(pages_by_id["folder"]["export_suppressed"])
         self.assertEqual("Folder Root", pages_by_id["folder"]["title"])
@@ -394,7 +396,7 @@ class ConfluenceToRepoHelpersTests(unittest.TestCase):
             ("folder", "folder"): [{"id": "leaf", "type": "page", "title": "Leaf"}],
         }
 
-        pages_by_id, children_by_id, excluded = helpers.collect_pages(
+        pages_by_id, children_by_id, excluded, unavailable = helpers.collect_pages(
             client,
             "folder",
             recurse=True,
@@ -403,9 +405,38 @@ class ConfluenceToRepoHelpersTests(unittest.TestCase):
         )
 
         self.assertEqual([], excluded)
+        self.assertEqual([], unavailable)
         self.assertEqual(["leaf"], children_by_id["folder"])
         self.assertEqual("folder", pages_by_id["folder"]["content_type"])
         self.assertEqual("Leaf", pages_by_id["leaf"]["title"])
+
+    def test_collect_pages_skips_unavailable_child_page(self) -> None:
+        client = FakeClient()
+        client.pages = {
+            "root": {
+                "id": "root",
+                "title": "Root",
+                "body": {"storage": {"value": "<p>Root body</p>"}},
+                "space": {"key": "IDD"},
+                "version": {"number": 1},
+            },
+        }
+        client.direct_children_by_node = {
+            ("root", "page"): [{"id": "missing", "type": "page", "title": "Missing"}],
+        }
+
+        pages_by_id, children_by_id, excluded, unavailable = helpers.collect_pages(
+            client,
+            "root",
+            recurse=True,
+            excluded_page_ids=set(),
+            default_space_key="IDD",
+        )
+
+        self.assertEqual([], excluded)
+        self.assertEqual(["missing (page)"], unavailable)
+        self.assertEqual([], children_by_id["root"])
+        self.assertEqual(["root"], list(pages_by_id))
 
 
 if __name__ == "__main__":

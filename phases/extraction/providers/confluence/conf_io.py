@@ -258,7 +258,16 @@ def sync_to_confluence(project: Dict[str, Any], identity_overrides: Dict[str, Op
             if not img_path.exists():
                 continue
             if not project.get("dry_run"):
-                client.upsert_attachment(page_id, img_path)
+                try:
+                    client.upsert_attachment(page_id, img_path)
+                except requests.RequestException as exc:
+                    conflict_message = (
+                        f"Failed to upload attachment {img_path.name} from "
+                        f"{helpers.relative_source_path(path, source)} to page '{title}' ({page_id}): {exc}"
+                    )
+                    helpers.LOG.error(conflict_message)
+                    report["conflicts"].append(conflict_message)
+                    return finalize(4)
                 report["uploaded_attachments"].append(f"{img_path.name} -> {title} ({page_id})")
                 new_tag = soup.new_tag("ac:image")
                 ri = soup.new_tag("ri:attachment")
@@ -458,7 +467,7 @@ def _export_single_target(target: Dict[str, Any], identity_overrides: Dict[str, 
 
     client = ConfluenceClient(base_url, email, token)
     excluded_page_ids = set(report["excluded_pages"])
-    pages_by_id, children_by_id, excluded_hits = helpers.collect_pages(
+    pages_by_id, children_by_id, excluded_hits, unavailable_hits = helpers.collect_pages(
         client,
         str(target["id"]),
         bool(target.get("recurse", False)),
@@ -467,6 +476,10 @@ def _export_single_target(target: Dict[str, Any], identity_overrides: Dict[str, 
     )
     if excluded_hits:
         report["warnings"].append(f"Skipped excluded page ids during collection: {', '.join(excluded_hits)}")
+    if unavailable_hits:
+        report["warnings"].append(
+            f"Skipped unavailable Confluence content during collection: {', '.join(unavailable_hits)}"
+        )
     if str(target["id"]) in excluded_page_ids:
         report["warnings"].append(
             f"Root page {target['id']} is being used as the extraction anchor, but its own content will not be exported"

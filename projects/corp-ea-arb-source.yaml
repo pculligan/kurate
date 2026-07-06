@@ -1,0 +1,21 @@
+name: corp-ea-arb-source
+workspace: /Users/patrickculligan/work/corp-ea-arb/source
+phases:
+  extraction:
+    provider: confluence
+    activity: export
+    metadata:
+      - file
+
+    spaces:
+      GACS:
+        pages:
+          - id: 552501638
+            output: gacs-architecture-governance
+            recurse: true
+
+      MAC:
+        pages:
+          - id: 180824160
+            output: mac-architecture-governance
+            recurse: true
