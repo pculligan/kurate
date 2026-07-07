@@ -14,9 +14,11 @@ phases:
       - "**/*.tmp.md"
       - ai-handoff-primer.md
       - "**ai-primer.md"
+      - "**ai-guide.md"
       - exported/
       - old-content/
-      - "**v4/presentation"
-      - "**v4/metadata"
-      - "**v4/sources"
+      - "**last-mile-analysis/deliverables/presentation"
+      - "**last-mile-analysis/deliverables/metadata"
+      - "**last-mile-analysis/deliverables/sources"
+      - "**last-mile-analysis/deliverables/revisions"
     dry_run: false
